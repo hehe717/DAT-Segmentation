@@ -16,8 +16,6 @@ import torch.nn.functional as F
 from .loading import load_checkpoint
 from timm.models.layers import DropPath, to_2tuple
 from ..utils.dat_blocks import *
-from ..utils.nat import NeighborhoodAttention2D
-from ..utils.slide import SlideAttention
 
 import torch.utils.checkpoint as cp
 

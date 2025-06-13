@@ -5,9 +5,6 @@ from pathlib import Path
 from typing import Any
 
 import torch
-
-from backbones.loading import load_checkpoint
-
 # -----------------------------------------------------------------------------
 # Helper utilities
 # -----------------------------------------------------------------------------
@@ -77,7 +74,7 @@ def main() -> None:
     args = parser.parse_args()
 
     model = build_model_from_config(args.config)
-    print("Model built on GPU (cuda)")
+    print("Model built successfully, {}".format(model))
 
 
 if __name__ == "__main__":
