@@ -14,10 +14,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from .loading import load_checkpoint
-from mmseg.utils import get_root_logger
-from mmcv.runner import auto_fp16
 from timm.models.layers import DropPath, to_2tuple
-from mmseg.models.builder import BACKBONES
 from ..utils.dat_blocks import *
 from ..utils.nat import NeighborhoodAttention2D
 from ..utils.slide import SlideAttention
@@ -30,7 +27,6 @@ class LayerScale(nn.Module):
         self.gamma = nn.Parameter(init_values * torch.ones(dim))
         self.fp16_enabled = False
     
-    @auto_fp16(apply_to=('x', ))
     def forward(self, x):
         B, C, H, W = x.size()
         gamma = self.gamma[None, :, None, None].expand(B, C, H, W)
@@ -129,7 +125,6 @@ class TransformerStage(nn.Module):
                 raise NotImplementedError(f'Spec: {stage_spec[i]} is not supported.')
             self.drop_path.append(DropPath(drop_path_rate[i]) if drop_path_rate[i] > 0.0 else nn.Identity())
     
-    @auto_fp16(apply_to=('x', ))
     def _inner_forward(self, x):
 
         # assert x.dtype == torch.float16, f"AMP failed!, dtype={x.dtype}"
@@ -165,15 +160,12 @@ class TransformerStage(nn.Module):
         # assert x.dtype == torch.float16, f"AMP failed!, dtype={x.dtype}"
         return x
 
-    @auto_fp16(apply_to=('x', ))
     def forward(self, x):
         if self.training and x.requires_grad and self.use_checkpoint:
             return cp.checkpoint(self._inner_forward, x)
         else:
             return self._inner_forward(x)
 
-
-@BACKBONES.register_module()
 class DAT(nn.Module):
 
     def __init__(self, img_size=224, patch_size=4, num_classes=1000, expansion=4,
@@ -302,11 +294,9 @@ class DAT(nn.Module):
             return
         
         if isinstance(pretrained, str):
-            logger = get_root_logger()
             load_checkpoint(self, pretrained, strict=False, logger=logger)
-            logger.info("DAT bakcbone has been loaded successfully!")
+            print("DAT bakcbone has been loaded successfully!")
 
-    @auto_fp16(apply_to=('x', ))
     def forward(self, x):
         
         x = self.patch_proj(x)

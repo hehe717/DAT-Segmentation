@@ -6,7 +6,7 @@ from typing import Any
 
 import torch
 
-from models.backbones.loading import load_checkpoint  # our minimal loader
+from backbones.loading import load_checkpoint
 
 # -----------------------------------------------------------------------------
 # Helper utilities
