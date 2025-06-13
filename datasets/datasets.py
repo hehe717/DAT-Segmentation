@@ -1,29 +1,3 @@
-"""Pure-PyTorch ADE20K dataset with augmentation pipeline.
-
-This dataset class **does not depend on mmsegmentation**.  It re-implements
-(in the same order) the augmentation pipeline defined in
-`configs/_base_/datasets/ade20k.py` so that you can train models with the
-exact same data processing while keeping the code base lightweight.
-
-Key features
-------------
-1. Train / val splits handled via directory names exactly as in ADE20K
-   (``images/training``, ``images/validation`` etc.).
-2. Augmentations implemented with NumPy / OpenCV & PyTorch – no extra
-   heavy libraries required.
-3. Correct handling of label 0 (background) – it is remapped to **255** so
-   that you can safely set ``ignore_index=255`` in your loss function to
-   reproduce `reduce_zero_label=True` behaviour.
-4. Follows the original pipeline order:
-   Load → Resize (random scale) → RandomCrop (balanced) → RandomFlip →
-   PhotoMetricDistortion → Normalize → Pad → ToTensor.
-
-Example
--------
->>> from datasets.ade20k_custom import ADE20KDataset
->>> train_set = ADE20KDataset('/path/to/ADEChallengeData2016', split='train')
->>> img, mask = train_set[0]  # torch.Tensor [3,512,512] , [512,512]
-"""
 
 from __future__ import annotations
 
@@ -68,24 +42,32 @@ def _random_crop(img: np.ndarray, mask: np.ndarray) -> Tuple[np.ndarray, np.ndar
     If the constraint cannot be satisfied in 10 attempts we fall back to a
     simple centre crop.
     """
-    h, w = img.shape[:2]
+    # Always produce output of size _CROP_SIZE, following mmseg RandomCrop.
     ch, cw = _CROP_SIZE
-    if h <= ch or w <= cw:
-        # Will be padded later; just return original
-        return img, mask
 
+    # Step 1: Pad if image is smaller than crop size (same logic as mmseg's
+    #         pad_if_needed inside RandomCrop).
+    h, w = img.shape[:2]
+    pad_h = max(ch - h, 0)
+    pad_w = max(cw - w, 0)
+    if pad_h > 0 or pad_w > 0:
+        img = cv2.copyMakeBorder(img, 0, pad_h, 0, pad_w, cv2.BORDER_CONSTANT, value=0)
+        mask = cv2.copyMakeBorder(mask, 0, pad_h, 0, pad_w, cv2.BORDER_CONSTANT, value=255)
+        h, w = img.shape[:2]  # update sizes after padding
+
+    # Step 2: Try 10 times to satisfy cat_max_ratio=0.75
     for _ in range(10):
         top = random.randint(0, h - ch)
         left = random.randint(0, w - cw)
         crop_mask = mask[top : top + ch, left : left + cw]
-        labels, counts = np.unique(crop_mask, return_counts=True)
-        if counts.max() / counts.sum() <= 0.75:
-            return (
-                img[top : top + ch, left : left + cw],
-                crop_mask,
-            )
 
-    # fallback – centre crop
+        labels, counts = np.unique(crop_mask, return_counts=True)
+        if counts.size == 0:
+            break  # empty? unlikely, but fallback to center crop
+        if counts.max() / counts.sum() <= 0.75:
+            return img[top : top + ch, left : left + cw], crop_mask
+
+    # Step 3: fallback centre crop
     center_top = (h - ch) // 2
     center_left = (w - cw) // 2
     return (
@@ -178,6 +160,27 @@ class ADE20KDataset(Dataset):
 
         img_dir = self.root / "images" / split_dir
         ann_dir = self.root / "annotations" / split_dir
+
+        # If default ADE20K layout not found, support alternative common layout
+        # where data is stored under `<root>/<train|val>/img` and
+        # `<root>/<train|val>/annotations`. This allows training with
+        # lightweight dataset extractions without reorganising files.
+        if not img_dir.exists() or not ann_dir.exists():
+            alt_root = self.root / split  # e.g. <root>/train or /val
+            alt_img_dir = alt_root / "img"
+            alt_ann_dir = alt_root / "annotations"
+
+            if alt_img_dir.exists() and alt_ann_dir.exists():
+                img_dir = alt_img_dir
+                ann_dir = alt_ann_dir
+
+        if not img_dir.exists() or not ann_dir.exists():
+            raise FileNotFoundError(
+                f"Dataset directories not found. Checked: \n"
+                f" 1) {self.root}/images/{split_dir} and annotations/{split_dir} \n"
+                f" 2) {self.root}/{split}/img and {self.root}/{split}/annotations"
+            )
+
         self.images = sorted(img_dir.rglob("*.jpg"))
         self.masks = [ann_dir / (p.stem + ".png") for p in self.images]
         self.is_train = split in {"train", "training"}

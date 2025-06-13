@@ -10,7 +10,7 @@ import torch.optim as optim
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
-from builder import build_model_from_config
+from models.builder import build_model_from_config
 from datasets.datasets import ADE20KDataset
 
 
