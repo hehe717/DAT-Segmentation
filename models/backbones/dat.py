@@ -100,11 +100,7 @@ class TransformerStage(nn.Module):
             ]
         )
         for i in range(depths):
-            if stage_spec[i] == 'L':
-                self.attns.append(
-                    LocalAttention(dim_embed, heads, window_size, attn_drop, proj_drop)
-                )
-            elif stage_spec[i] == 'D':
+            if stage_spec[i] == 'D':
                 self.attns.append(
                     DAttentionBaseline(
                         fmap_size, 
@@ -125,34 +121,12 @@ class TransformerStage(nn.Module):
                         stage_i
                     )
                 )
-            elif stage_spec[i] == 'S':
-                shift_size = math.ceil(window_size / 2)
-                self.attns.append(
-                    ShiftWindowAttention(dim_embed, heads, window_size, attn_drop, proj_drop, shift_size, fmap_size)
-                )
-            elif stage_spec[i] == 'N':
-                self.attns.append(
-                    NeighborhoodAttention2D(dim_embed, nat_ksize, heads, attn_drop, proj_drop)
-                )
-            elif stage_spec[i] == 'A':
-                self.attns.append(
-                    LDABaseline(fmap_size, local_kv_size, heads, hc, n_groups, use_pe, no_off, local_orf)
-                )
-            elif stage_spec[i] == 'P':
-                self.attns.append(
-                    PyramidAttention(dim_embed, heads, attn_drop, proj_drop, sr_ratio)
-                )
             elif self.stage_spec[i] == 'X':
                 self.attns.append(
                     nn.Conv2d(dim_embed, dim_embed, kernel_size=window_size, padding=window_size // 2, groups=dim_embed)
                 )
-            elif self.stage_spec[i] == 'E':
-                self.attns.append(
-                    SlideAttention(dim_embed, heads, 3)
-                )
             else:
                 raise NotImplementedError(f'Spec: {stage_spec[i]} is not supported.')
-            
             self.drop_path.append(DropPath(drop_path_rate[i]) if drop_path_rate[i] > 0.0 else nn.Identity())
     
     @auto_fp16(apply_to=('x', ))
@@ -172,9 +146,9 @@ class TransformerStage(nn.Module):
             
             if self.stage_spec[d] == 'X':
                 x0 = x
-                x = self.attns[d](x.contiguous())
+                x = self.attns[d](self.layer_norms[2 * d](x))
                 x = self.mlps[d](self.ln_cnvnxt[str(d)](x))
-                x = self.drop_path[d](x) + x0
+                x = self.drop_path[d](x)
             else:
                 x0 = x
                 x, pos, ref = self.attns[d](self.layer_norms[2 * d](x))
