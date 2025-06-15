@@ -13,6 +13,7 @@ from torch.utils.data import DataLoader, DistributedSampler
 from models.builder import build_model_from_config
 from datasets.datasets import ADE20KDataset
 import torch.distributed as dist
+from models.backbones.loading import load_checkpoint
 
 
 class WarmupPolyLRScheduler(optim.lr_scheduler._LRScheduler):
@@ -62,6 +63,7 @@ def parse_args():
     parser.add_argument("--ckpt_interval", type=int, default=16000)
     parser.add_argument("--num_classes", type=int, default=150)
     parser.add_argument("--local_rank", type=int, default=-1, help="Local rank for distributed training")
+    parser.add_argument("--pretrained", default="pretrained/upn_dat_t_160k.pth", help="Path to a pretrained checkpoint (.pth) to load before training")
     return parser.parse_args()
 
 
@@ -85,6 +87,16 @@ def main():
 
     # ---------------- Model ----------------
     model = build_model_from_config(args.config).to(device)
+
+    # Optionally load a full-model checkpoint (strict=False: 구조 변동 허용)
+    if args.pretrained and os.path.isfile(args.pretrained):
+        try:
+            load_checkpoint(model, args.pretrained, map_location=device, strict=False)
+            if local_rank == 0:
+                print(f"[Info] Loaded pretrained weights from {args.pretrained}")
+        except Exception as e:
+            if local_rank == 0:
+                print(f"[Warning] Failed to load pretrained weights: {e}")
 
     if distributed:
         model = nn.parallel.DistributedDataParallel(model, device_ids=[local_rank], find_unused_parameters=False)
