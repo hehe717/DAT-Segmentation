@@ -18,7 +18,7 @@ from torchvision import datasets, transforms
 from torchvision.transforms import InterpolationMode
 
 from models.dat_classifier import DatClassifier
-from imagenet_dataloader import get_imagenet_dataloader, LabelSmoothingCrossEntropy
+from datasets.imagenet_dataloader import get_imagenet_dataloader, LabelSmoothingCrossEntropy
 
 
 
