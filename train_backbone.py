@@ -21,60 +21,6 @@ from models.dat_classifier import DatClassifier
 from imagenet_dataloader import get_imagenet_dataloader, LabelSmoothingCrossEntropy
 
 
-def build_dataloaders(args):
-    """ImageNet 학습/검증 DataLoader 구성"""
-
-    normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-
-    train_trans = transforms.Compose([
-        transforms.RandomResizedCrop(224, interpolation=InterpolationMode.BICUBIC),
-        transforms.RandomHorizontalFlip(),
-        transforms.ColorJitter(0.4, 0.4, 0.4, 0.1),
-        transforms.ToTensor(),
-        normalize,
-    ])
-
-    val_trans = transforms.Compose([
-        transforms.Resize(256, interpolation=InterpolationMode.BICUBIC),
-        transforms.CenterCrop(224),
-        transforms.ToTensor(),
-        normalize,
-    ])
-
-    train_dir = Path(args.data) / "train"
-    val_dir = Path(args.data) / "val"
-
-    train_set = datasets.ImageFolder(train_dir, transform=train_trans)
-    val_set = datasets.ImageFolder(val_dir, transform=val_trans)
-
-    if args.distributed:
-        train_sampler = DistributedSampler(train_set)
-        val_sampler = DistributedSampler(val_set, shuffle=False)
-    else:
-        train_sampler = None
-        val_sampler = None
-
-    train_loader = DataLoader(
-        train_set,
-        batch_size=args.batch_size,
-        shuffle=(train_sampler is None),
-        sampler=train_sampler,
-        num_workers=args.workers,
-        pin_memory=True,
-        drop_last=True,
-    )
-
-    val_loader = DataLoader(
-        val_set,
-        batch_size=args.batch_size,
-        shuffle=False,
-        sampler=val_sampler,
-        num_workers=args.workers,
-        pin_memory=True,
-    )
-
-    return train_loader, val_loader, train_sampler
-
 
 def accuracy(output, target, topk=(1,)):
     """top-k 정확도 산출"""
@@ -91,7 +37,7 @@ def accuracy(output, target, topk=(1,)):
         return res
 
 
-def train_one_epoch(model, loader, criterion, optimizer, device, epoch, scaler=None, mixup_cutmix=None, log_interval=100):
+def train_one_epoch(model, loader, criterion, optimizer, device, epoch, mixup_cutmix=None, log_interval=100):
     model.train()
     running_loss = 0.0
     running_acc1 = 0.0
@@ -103,19 +49,10 @@ def train_one_epoch(model, loader, criterion, optimizer, device, epoch, scaler=N
             imgs, labels = mixup_cutmix((imgs, labels))
 
         optimizer.zero_grad(set_to_none=True)
-
-        if scaler is not None:
-            with torch.cuda.amp.autocast():
-                outputs, _, _ = model(imgs)
-                loss = criterion(outputs, labels)
-            scaler.scale(loss).backward()
-            scaler.step(optimizer)
-            scaler.update()
-        else:
-            outputs, _, _ = model(imgs)
-            loss = criterion(outputs, labels)
-            loss.backward()
-            optimizer.step()
+        outputs, _, _ = model(imgs)
+        loss = criterion(outputs, labels)
+        loss.backward()
+        optimizer.step()
 
         acc1, _ = accuracy(outputs, labels, topk=(1, 5))
         running_loss += loss.item()
@@ -151,13 +88,12 @@ def main():
     parser = argparse.ArgumentParser(description="DAT ImageNet Training")
     parser.add_argument("--data", required=True, help="ImageNet root directory")
     parser.add_argument("--epochs", default=300, type=int)
-    parser.add_argument("--batch-size", default=256, type=int)
-    parser.add_argument("--lr", default=0.0005, type=float)
-    parser.add_argument("--workers", default=8, type=int)
+    parser.add_argument("--batch-size", default=128, type=int)
+    parser.add_argument("--lr", default=0.0001, type=float)
+    parser.add_argument("--workers", default=32, type=int)
     parser.add_argument("--weight-decay", default=0.05, type=float)
-    parser.add_argument("--amp", action="store_true", help="Use mixed precision training")
     parser.add_argument("--pretrained", default=None, help="Path to pretrained DAT checkpoint")
-    parser.add_argument("--output", default="outputs", help="Checkpoint and log directory")
+    parser.add_argument("--output", default="./logs", help="Checkpoint and log directory")
     parser.add_argument("--distributed", action="store_true")
     args = parser.parse_args()
 
@@ -185,8 +121,6 @@ def main():
 
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
 
-    scaler = torch.cuda.amp.GradScaler() if args.amp else None
-
     train_loader, val_loader, mixup_cutmix = get_imagenet_dataloader(
         args.data,
         batch_size=args.batch_size,
@@ -203,7 +137,7 @@ def main():
             train_sampler.set_epoch(epoch)
 
         train_one_epoch(
-            model, train_loader, criterion, optimizer, device, epoch, scaler=scaler, mixup_cutmix=mixup_cutmix
+            model, train_loader, criterion, optimizer, device, epoch, mixup_cutmix=mixup_cutmix
         )
         val_loss, val_acc1, val_acc5 = validate(model, val_loader, criterion, device)
         scheduler.step()
@@ -218,7 +152,6 @@ def main():
                     "epoch": epoch,
                     "model_state": model.state_dict(),
                     "optimizer_state": optimizer.state_dict(),
-                    "scaler_state": scaler.state_dict() if scaler else None,
                     "acc1": val_acc1,
                 },
                 ckpt_path,
