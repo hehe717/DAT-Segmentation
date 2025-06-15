@@ -2,16 +2,17 @@ import argparse
 import importlib.util
 import os
 from pathlib import Path
-from itertools import cycle
+# from itertools import cycle  # 삭제: DDP 환경에선 사용하지 않음
 
 import torch
 import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, DistributedSampler
 
 from models.builder import build_model_from_config
 from datasets.datasets import ADE20KDataset
+import torch.distributed as dist
 
 
 class WarmupPolyLRScheduler(optim.lr_scheduler._LRScheduler):
@@ -47,33 +48,6 @@ class WarmupPolyLRScheduler(optim.lr_scheduler._LRScheduler):
         return [max(self.min_lr, base_lr * factor) for base_lr in self.base_lrs]
 
 
-def build_segmentation_model(backbone: torch.nn.Module, num_classes: int) -> torch.nn.Module:
-    """Wrap DAT backbone with a simple 1×1 conv head for semantic segmentation."""
-
-    # Infer channel dimension with a dummy forward pass
-    device = next(backbone.parameters()).device
-    with torch.no_grad():
-        dummy = torch.zeros(1, 3, 512, 512, device=device)
-        feats = backbone(dummy)
-        in_channels = feats[-1].shape[1]
-
-    head = nn.Conv2d(in_channels, num_classes, kernel_size=1)
-
-    class _SegModel(nn.Module):
-        def __init__(self, backbone, head):
-            super().__init__()
-            self.backbone = backbone
-            self.head = head
-
-        def forward(self, x):
-            feats = self.backbone(x)
-            logits = self.head(feats[-1])  # use last stage feature
-            logits = F.interpolate(logits, size=x.shape[2:], mode="bilinear", align_corners=False)
-            return logits
-
-    return _SegModel(backbone, head)
-
-
 def parse_args():
     parser = argparse.ArgumentParser(description="DAT semantic segmentation training script")
     parser.add_argument("--config", default="configs/dat/upn_tiny_160k_dp03_lr6.py", help="Path to config file")
@@ -87,6 +61,7 @@ def parse_args():
     parser.add_argument("--print_interval", type=int, default=50)
     parser.add_argument("--ckpt_interval", type=int, default=16000)
     parser.add_argument("--num_classes", type=int, default=150)
+    parser.add_argument("--local_rank", type=int, default=-1, help="Local rank for distributed training")
     return parser.parse_args()
 
 
@@ -94,19 +69,35 @@ def main():
     args = parse_args()
     os.makedirs(args.save_dir, exist_ok=True)
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    # ---------------- Distributed init ----------------
+    distributed = False
+    if ("WORLD_SIZE" in os.environ and int(os.environ["WORLD_SIZE"]) > 1) or args.local_rank != -1:
+        distributed = True
+
+    if distributed:
+        dist.init_process_group(backend="nccl", init_method="env://")
+        local_rank = args.local_rank if args.local_rank != -1 else int(os.environ.get("LOCAL_RANK", 0))
+        torch.cuda.set_device(local_rank)
+        device = torch.device(f"cuda:{local_rank}")
+    else:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        local_rank = 0
 
     # ---------------- Model ----------------
-    backbone = build_model_from_config(args.config)  # already on CUDA inside builder
-    model = build_segmentation_model(backbone, args.num_classes).to(device)
+    model = build_model_from_config(args.config).to(device)
+
+    if distributed:
+        model = nn.parallel.DistributedDataParallel(model, device_ids=[local_rank], find_unused_parameters=False)
     model.train()
 
     # ---------------- Data ----------------
     train_set = ADE20KDataset(args.data_root, split="train", crop_size=(512, 512), ignore_index=255)
+    sampler = DistributedSampler(train_set, shuffle=True, drop_last=True) if distributed else None
     train_loader = DataLoader(
         train_set,
         batch_size=args.batch_size,
-        shuffle=True,
+        shuffle=(sampler is None),
+        sampler=sampler,
         num_workers=args.workers,
         pin_memory=True,
         drop_last=True,
@@ -140,12 +131,23 @@ def main():
         min_lr=0.0,
     )
 
-    # ---------------- Train loop ----------------
-    data_iter = cycle(train_loader)
+    # ---------------- Iteration helpers ----------------
+    sampler_epoch = 0
+    if sampler is not None:
+        sampler.set_epoch(sampler_epoch)
+    train_loader_iter = iter(train_loader)
     iter_idx = 0
 
     while iter_idx < args.max_iters:
-        imgs, masks, _ = next(data_iter)
+        try:
+            imgs, masks, _ = next(train_loader_iter)
+        except StopIteration:
+            sampler_epoch += 1
+            if sampler is not None:
+                sampler.set_epoch(sampler_epoch)
+            train_loader_iter = iter(train_loader)
+            imgs, masks, _ = next(train_loader_iter)
+
         imgs, masks = imgs.to(device, non_blocking=True), masks.to(device, non_blocking=True)
 
         optimizer.zero_grad(set_to_none=True)
@@ -157,16 +159,16 @@ def main():
         optimizer.step()
         scheduler.step()
 
-        if (iter_idx + 1) % args.print_interval == 0:
+        if (iter_idx + 1) % args.print_interval == 0 and (not distributed or dist.get_rank() == 0):
             current_lr = scheduler.get_last_lr()[0]
             print(f"Iter [{iter_idx + 1}/{args.max_iters}]  Loss: {loss.item():.4f}  LR: {current_lr:.6f}")
 
-        if (iter_idx + 1) % args.ckpt_interval == 0:
+        if (iter_idx + 1) % args.ckpt_interval == 0 and (not distributed or dist.get_rank() == 0):
             ckpt_path = Path(args.save_dir) / f"iter_{iter_idx + 1}.pth"
             torch.save(
                 {
                     "iter": iter_idx + 1,
-                    "model_state": model.state_dict(),
+                    "model_state": model.module.state_dict() if distributed else model.state_dict(),
                     "optimizer_state": optimizer.state_dict(),
                 },
                 ckpt_path,
@@ -175,7 +177,11 @@ def main():
 
         iter_idx += 1
 
-    print("Training completed.")
+    if not distributed or dist.get_rank() == 0:
+        print("Training completed.")
+
+    if distributed:
+        dist.destroy_process_group()
 
 
 if __name__ == "__main__":
