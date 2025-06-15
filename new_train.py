@@ -66,6 +66,7 @@ def parse_args():
     parser.add_argument("--num_classes", type=int, default=150)
     parser.add_argument("--local_rank", type=int, default=-1, help="Local rank for distributed training")
     parser.add_argument("--pretrained", default="pretrained/upn_dat_t_160k.pth", help="Path to a pretrained checkpoint (.pth) to load before training")
+    parser.add_argument("--aux_loss_weight", type=float, default=0.4, help="Weight for auxiliary loss (set 0 to disable)")
     return parser.parse_args()
 
 
@@ -192,7 +193,16 @@ def main():
         optimizer.zero_grad(set_to_none=True)
 
         logits = model(imgs)
+        aux_logits = None
+        if isinstance(logits, tuple):
+            logits, aux_logits = logits  # type: ignore
+
         loss = criterion(logits, masks)
+
+        # Auxiliary loss (if provided by model output and weight > 0)
+        if args.aux_loss_weight > 0 and aux_logits is not None:
+            aux_loss = criterion(aux_logits, masks)
+            loss = loss + args.aux_loss_weight * aux_loss
 
         # Metric accumulation BEFORE gradients so it doesn't interfere with DDP sync
         inter, union = _intersection_and_union(logits, masks, args.num_classes, ignore_index=255)

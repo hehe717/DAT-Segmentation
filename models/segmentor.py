@@ -55,4 +55,7 @@ class EncoderDecoder(nn.Module):
             # store for external usage (e.g., custom loss calculation)
             self.last_aux_logits = aux_logits.detach() if not self.training else aux_logits
 
+            if self.training:
+                return logits, aux_logits
+
         return logits 
