@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import random
@@ -217,6 +216,11 @@ class ADE20KDataset(Dataset):
             img, mask = _random_crop(img, mask)
             img, mask = _random_flip(img, mask)
             img = _photometric_distortion(img)
+            img = _normalize(img)
+            img, mask = _pad(img, mask)
+        else:
+            # --- validation / test preprocessing ---
+            img, mask = _resize_keep_ratio(img, mask)
             img = _normalize(img)
             img, mask = _pad(img, mask)
 

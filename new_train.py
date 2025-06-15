@@ -14,6 +14,7 @@ from models.builder import build_model_from_config
 from datasets.datasets import ADE20KDataset
 import torch.distributed as dist
 from models.backbones.loading import load_checkpoint
+import numpy as np
 
 
 class WarmupPolyLRScheduler(optim.lr_scheduler._LRScheduler):
@@ -61,6 +62,7 @@ def parse_args():
     parser.add_argument("--max_iters", type=int, default=160000)
     parser.add_argument("--print_interval", type=int, default=50)
     parser.add_argument("--ckpt_interval", type=int, default=16000)
+    parser.add_argument("--eval_interval", type=int, default=16000, help="Interval (iters) to run validation evaluation")
     parser.add_argument("--num_classes", type=int, default=150)
     parser.add_argument("--local_rank", type=int, default=-1, help="Local rank for distributed training")
     parser.add_argument("--pretrained", default="pretrained/upn_dat_t_160k.pth", help="Path to a pretrained checkpoint (.pth) to load before training")
@@ -115,6 +117,16 @@ def main():
         drop_last=True,
     )
 
+    # Validation set & loader
+    val_set = ADE20KDataset(args.data_root, split="val", crop_size=(512, 512), ignore_index=255)
+    val_loader = DataLoader(
+        val_set,
+        batch_size=1,
+        shuffle=False,
+        num_workers=args.workers,
+        pin_memory=True,
+    )
+
     # ---------------- Optim & LR ----------------
     criterion = nn.CrossEntropyLoss(ignore_index=255)
 
@@ -150,6 +162,10 @@ def main():
     train_loader_iter = iter(train_loader)
     iter_idx = 0
 
+    # ---------------- Metric accumulators ----------------
+    train_area_inter = np.zeros(args.num_classes, dtype=np.int64)
+    train_area_union = np.zeros(args.num_classes, dtype=np.int64)
+
     while iter_idx < args.max_iters:
         try:
             imgs, masks, _ = next(train_loader_iter)
@@ -167,13 +183,24 @@ def main():
         logits = model(imgs)
         loss = criterion(logits, masks)
 
+        # Metric accumulation BEFORE gradients so it doesn't interfere with DDP sync
+        inter, union = _intersection_and_union(logits, masks, args.num_classes, ignore_index=255)
+        train_area_inter += inter
+        train_area_union += union
+
         loss.backward()
         optimizer.step()
         scheduler.step()
 
         if (iter_idx + 1) % args.print_interval == 0 and (not distributed or dist.get_rank() == 0):
             current_lr = scheduler.get_last_lr()[0]
-            print(f"Iter [{iter_idx + 1}/{args.max_iters}]  Loss: {loss.item():.4f}  LR: {current_lr:.6f}")
+            train_miou = _compute_miou(train_area_inter, train_area_union)
+            print(
+                f"Iter [{iter_idx + 1}/{args.max_iters}]  Loss: {loss.item():.4f}  LR: {current_lr:.6f}  Train mIoU: {train_miou:.4f}"
+            )
+            # reset accumulators
+            train_area_inter.fill(0)
+            train_area_union.fill(0)
 
         if (iter_idx + 1) % args.ckpt_interval == 0 and (not distributed or dist.get_rank() == 0):
             ckpt_path = Path(args.save_dir) / f"iter_{iter_idx + 1}.pth"
@@ -187,6 +214,11 @@ def main():
             )
             print(f"Checkpoint saved to {ckpt_path}")
 
+        # ---------------- Validation evaluation ----------------
+        if (iter_idx + 1) % args.eval_interval == 0 and (not distributed or dist.get_rank() == 0):
+            val_miou = _evaluate(model if not distributed else model.module, val_loader, device, args.num_classes)
+            print(f"[Val] Iter {iter_idx + 1}: mIoU {val_miou:.4f}")
+
         iter_idx += 1
 
     if not distributed or dist.get_rank() == 0:
@@ -194,6 +226,70 @@ def main():
 
     if distributed:
         dist.destroy_process_group()
+
+
+###############################################################################
+# Metric helpers
+###############################################################################
+
+
+def _intersection_and_union(
+    logits: torch.Tensor,
+    masks: torch.Tensor,
+    num_classes: int,
+    ignore_index: int = 255,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Compute intersection and union CPU numpy arrays for a batch."""
+    with torch.no_grad():
+        if logits.dim() == 4:  # (B, C, H, W)
+            preds = logits.argmax(1)
+        else:
+            preds = logits
+
+        preds = preds.view(-1)
+        masks = masks.view(-1)
+
+        valid = masks != ignore_index
+        preds = preds[valid]
+        masks = masks[valid]
+
+        intersection = preds[preds == masks]
+        area_inter = torch.bincount(intersection, minlength=num_classes).cpu().numpy()
+        area_pred = torch.bincount(preds, minlength=num_classes).cpu().numpy()
+        area_mask = torch.bincount(masks, minlength=num_classes).cpu().numpy()
+        area_union = area_pred + area_mask - area_inter
+        return area_inter, area_union
+
+
+def _compute_miou(area_inter: np.ndarray, area_union: np.ndarray) -> float:
+    iou = area_inter / np.maximum(area_union, 1)
+    valid = area_union > 0
+    if valid.sum() == 0:
+        return 0.0
+    return float(iou[valid].mean())
+
+
+def _evaluate(
+    model: nn.Module,
+    loader: DataLoader,
+    device: torch.device,
+    num_classes: int,
+    ignore_index: int = 255,
+):
+    model.eval()
+    area_inter = np.zeros(num_classes, dtype=np.int64)
+    area_union = np.zeros(num_classes, dtype=np.int64)
+    with torch.no_grad():
+        for imgs, masks, _ in loader:
+            imgs = imgs.to(device, non_blocking=True)
+            masks = masks.to(device, non_blocking=True)
+            logits = model(imgs)
+            inter, union = _intersection_and_union(logits, masks, num_classes, ignore_index)
+            area_inter += inter
+            area_union += union
+    miou = _compute_miou(area_inter, area_union)
+    model.train()
+    return miou
 
 
 if __name__ == "__main__":
