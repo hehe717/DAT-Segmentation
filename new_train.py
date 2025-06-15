@@ -177,6 +177,8 @@ def main():
     # ---------------- Metric accumulators ----------------
     train_area_inter = np.zeros(args.num_classes, dtype=np.int64)
     train_area_union = np.zeros(args.num_classes, dtype=np.int64)
+    # Best validation mIoU 추적용 변수
+    best_val_miou = 0.0
 
     while iter_idx < args.max_iters:
         try:
@@ -239,6 +241,23 @@ def main():
         if (iter_idx + 1) % args.eval_interval == 0 and (not distributed or dist.get_rank() == 0):
             val_miou = _evaluate(model if not distributed else model.module, val_loader, device, args.num_classes)
             print(f"[Val] Iter {iter_idx + 1}: mIoU {val_miou:.4f}")
+
+            # ---------------- Best checkpoint 저장 ----------------
+            if val_miou > best_val_miou:
+                best_val_miou = val_miou
+                best_ckpt_path = Path(args.save_dir) / "best.pth"
+                torch.save(
+                    {
+                        "iter": iter_idx + 1,
+                        "best_miou": best_val_miou,
+                        "model_state": model.module.state_dict() if distributed else model.state_dict(),
+                        "optimizer_state": optimizer.state_dict(),
+                    },
+                    best_ckpt_path,
+                )
+                print(
+                    f"[Best] New best mIoU {best_val_miou:.4f} (↑) - checkpoint saved to {best_ckpt_path}"
+                )
 
         iter_idx += 1
 
