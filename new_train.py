@@ -90,6 +90,17 @@ def main():
     # ---------------- Model ----------------
     model = build_model_from_config(args.config).to(device)
 
+    # Disable gradient checkpointing (DAT backbone uses torch.utils.checkpoint)
+    # when combined with DDP(find_unused_parameters=True) it can trigger
+    # "Expected to mark a variable ready only once" errors.
+    def _recursively_disable_checkpoint(module):
+        if hasattr(module, 'use_checkpoint'):
+            module.use_checkpoint = False
+        for child in module.children():
+            _recursively_disable_checkpoint(child)
+
+    _recursively_disable_checkpoint(model)
+
     # Optionally load a full-model checkpoint (strict=False: 구조 변동 허용)
     if args.pretrained and os.path.isfile(args.pretrained):
         try:
@@ -101,7 +112,7 @@ def main():
                 print(f"[Warning] Failed to load pretrained weights: {e}")
 
     if distributed:
-        model = nn.parallel.DistributedDataParallel(model, device_ids=[local_rank], find_unused_parameters=True)
+        model = nn.parallel.DistributedDataParallel(model, device_ids=[local_rank], find_unused_parameters=False)
     model.train()
 
     # ---------------- Data ----------------
