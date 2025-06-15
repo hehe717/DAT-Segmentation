@@ -101,7 +101,7 @@ def main():
                 print(f"[Warning] Failed to load pretrained weights: {e}")
 
     if distributed:
-        model = nn.parallel.DistributedDataParallel(model, device_ids=[local_rank], find_unused_parameters=False)
+        model = nn.parallel.DistributedDataParallel(model, device_ids=[local_rank], find_unused_parameters=True)
     model.train()
 
     # ---------------- Data ----------------
