@@ -56,9 +56,11 @@ def _register_head(name):
 try:
     from models.heads.uper_head import UPerHead  # type: ignore
     from models.heads.fcn_head import FCNHead  # type: ignore
+    from models.heads.cls_head import ClsHead  # type: ignore
 
     _register_head("UPerHead")(UPerHead)
     _register_head("FCNHead")(FCNHead)
+    _register_head("ClsHead")(ClsHead)
 except ModuleNotFoundError:
     # Heads may not exist in some environments; builder can still create backbone only.
     pass
