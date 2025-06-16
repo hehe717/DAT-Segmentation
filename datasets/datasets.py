@@ -1,14 +1,16 @@
 from __future__ import annotations
 
-import random
-import math
 from pathlib import Path
-from typing import Tuple, List, Optional
+from typing import Tuple
 
 import cv2
 import numpy as np
 import torch
 from torch.utils.data import Dataset
+import random
+
+
+import albumentations as A  # type: ignore
 
 __all__ = ["ADE20KDataset"]
 
@@ -18,119 +20,7 @@ IMG_NORM_STD = np.array([58.395, 57.12, 57.375], dtype=np.float32)
 
 _CROP_SIZE: Tuple[int, int] = (512, 512)
 _IMG_SCALE: Tuple[int, int] = (2048, 512)  # (W, H)
-_RATIO_RANGE: Tuple[float, float] = (0.5, 2.0)
 
-
-###############################################################################
-# Utility augmentation helpers
-###############################################################################
-
-def _random_resize(img: np.ndarray, mask: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
-    """Randomly resize image & mask following mmseg's `Resize` operation."""
-    ratio = random.uniform(*_RATIO_RANGE)
-    new_w = int(_IMG_SCALE[0] * ratio)
-    new_h = int(_IMG_SCALE[1] * ratio)
-    img_resized = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
-    mask_resized = cv2.resize(mask, (new_w, new_h), interpolation=cv2.INTER_NEAREST)
-    return img_resized, mask_resized
-
-
-def _random_crop(img: np.ndarray, mask: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
-    """Random crop with cat_max_ratio=0.75 (at most 75% of any single class).
-
-    If the constraint cannot be satisfied in 10 attempts we fall back to a
-    simple centre crop.
-    """
-    # Always produce output of size _CROP_SIZE, following mmseg RandomCrop.
-    ch, cw = _CROP_SIZE
-
-    # Step 1: Pad if image is smaller than crop size (same logic as mmseg's
-    #         pad_if_needed inside RandomCrop).
-    h, w = img.shape[:2]
-    pad_h = max(ch - h, 0)
-    pad_w = max(cw - w, 0)
-    if pad_h > 0 or pad_w > 0:
-        img = cv2.copyMakeBorder(img, 0, pad_h, 0, pad_w, cv2.BORDER_CONSTANT, value=0)
-        mask = cv2.copyMakeBorder(mask, 0, pad_h, 0, pad_w, cv2.BORDER_CONSTANT, value=255)
-        h, w = img.shape[:2]  # update sizes after padding
-
-    # Step 2: Try 10 times to satisfy cat_max_ratio=0.75
-    for _ in range(10):
-        top = random.randint(0, h - ch)
-        left = random.randint(0, w - cw)
-        crop_mask = mask[top : top + ch, left : left + cw]
-
-        labels, counts = np.unique(crop_mask, return_counts=True)
-        if counts.size == 0:
-            break  # empty? unlikely, but fallback to center crop
-        if counts.max() / counts.sum() <= 0.75:
-            return img[top : top + ch, left : left + cw], crop_mask
-
-    # Step 3: fallback centre crop
-    center_top = (h - ch) // 2
-    center_left = (w - cw) // 2
-    return (
-        img[center_top : center_top + ch, center_left : center_left + cw],
-        mask[center_top : center_top + ch, center_left : center_left + cw],
-    )
-
-
-def _random_flip(img: np.ndarray, mask: np.ndarray, p: float = 0.5):
-    if random.random() < p:
-        img = np.ascontiguousarray(img[:, ::-1, :])
-        mask = np.ascontiguousarray(mask[:, ::-1])
-    return img, mask
-
-
-def _photometric_distortion(img: np.ndarray) -> np.ndarray:
-    """Implement mmseg PhotoMetricDistortion."""
-    img = img.astype(np.float32)
-
-    # Random brightness
-    if random.random() < 0.5:
-        delta = random.uniform(-32, 32)
-        img += delta
-
-    # Contrast or not first (50% chance)
-    if random.random() < 0.5:
-        alpha = random.uniform(0.5, 1.5)
-        img *= alpha
-
-    # Saturation
-    if random.random() < 0.5:
-        img_hsv = cv2.cvtColor(img.astype(np.uint8), cv2.COLOR_BGR2HSV).astype(np.float32)
-        img_hsv[:, :, 1] *= random.uniform(0.5, 1.5)
-        img = cv2.cvtColor(img_hsv.astype(np.uint8), cv2.COLOR_HSV2BGR).astype(np.float32)
-
-    # Hue
-    if random.random() < 0.5:
-        img_hsv = cv2.cvtColor(img.astype(np.uint8), cv2.COLOR_BGR2HSV).astype(np.float32)
-        img_hsv[:, :, 0] += random.uniform(-18, 18)
-        img = cv2.cvtColor(img_hsv.astype(np.uint8), cv2.COLOR_HSV2BGR).astype(np.float32)
-
-    # Contrast again if not yet applied
-    if random.random() < 0.5:
-        alpha = random.uniform(0.5, 1.5)
-        img *= alpha
-
-    return img
-
-
-def _normalize(img: np.ndarray) -> np.ndarray:
-    return (img - IMG_NORM_MEAN) / IMG_NORM_STD
-
-
-def _pad(img: np.ndarray, mask: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
-    ch, cw = _CROP_SIZE
-    h, w = img.shape[:2]
-    pad_h = max(ch - h, 0)
-    pad_w = max(cw - w, 0)
-    if pad_h == 0 and pad_w == 0:
-        return img, mask
-
-    img = cv2.copyMakeBorder(img, 0, pad_h, 0, pad_w, cv2.BORDER_CONSTANT, value=0)
-    mask = cv2.copyMakeBorder(mask, 0, pad_h, 0, pad_w, cv2.BORDER_CONSTANT, value=255)
-    return img, mask
 
 ###############################################################################
 # Dataset class
@@ -189,6 +79,11 @@ class ADE20KDataset(Dataset):
         _CROP_SIZE = crop_size
         self.ignore_index = ignore_index
 
+        # ------------------------------------------------------------------
+        # Transformation mode: use manual pipeline to mimic mmcv RandomResize
+        # ------------------------------------------------------------------
+        self.transform = None  # albumentations pipeline disabled
+
     def __len__(self):
         return len(self.images)
 
@@ -211,18 +106,9 @@ class ADE20KDataset(Dataset):
         mask[mask == 254] = self.ignore_index  # newly wrapped values
 
         if self.is_train:
-            # --- training augmentation pipeline ---
-            img, mask = _random_resize(img, mask)
-            img, mask = _random_crop(img, mask)
-            img, mask = _random_flip(img, mask)
-            img = _photometric_distortion(img)
-            img = _normalize(img)
-            img, mask = _pad(img, mask)
+            img, mask = _train_transform(img, mask, self.crop_size, self.ignore_index)
         else:
-            # --- validation / test preprocessing ---
-            img, mask = _resize_keep_ratio(img, mask)
-            img = _normalize(img)
-            img, mask = _pad(img, mask)
+            img, mask = _val_transform(img, mask, self.crop_size, self.ignore_index)
 
         # To tensor
         img = torch.from_numpy(img.transpose(2, 0, 1)).float()
@@ -236,18 +122,212 @@ class ADE20KDataset(Dataset):
 # -----------------------------------------------------------------------------
 
 
-def _resize_keep_ratio(img: np.ndarray, mask: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
-    """Resize so that output height==512, width scaled <=2048 keeping aspect."""
-    h, w = img.shape[:2]
-    scale = _IMG_SCALE[1] / h  # target_h / h (target_h=512)
-    new_h = _IMG_SCALE[1]
-    new_w = int(w * scale)
-    # ensure width does not exceed 2048, otherwise scale down further
-    if new_w > _IMG_SCALE[0]:
-        scale = _IMG_SCALE[0] / w
-        new_w = _IMG_SCALE[0]
-        new_h = int(h * scale)
+def _resize(
+    img: np.ndarray,
+    mask: np.ndarray,
+    scale: Tuple[int, int] = _IMG_SCALE,
+    *,
+    ratio_range: Tuple[float, float] | None = None,
+    keep_ratio: bool = False,
+) -> Tuple[np.ndarray, np.ndarray]:
 
+    base_w, base_h = scale
+
+    if ratio_range is not None:
+        ratio = random.uniform(*ratio_range)
+        target_w = int(base_w * ratio)
+        target_h = int(base_h * ratio)
+    else:
+        target_w, target_h = base_w, base_h
+
+    if keep_ratio:
+        # Compute new size preserving aspect ratio relative to *input* image.
+        h, w = img.shape[:2]
+        scale_factor = min(target_w / w, target_h / h)
+        resize_w = int(w * scale_factor + 0.5)
+        resize_h = int(h * scale_factor + 0.5)
+    else:
+        resize_w, resize_h = target_w, target_h
+
+    img = cv2.resize(img, (resize_w, resize_h), interpolation=cv2.INTER_LINEAR)
+    mask = cv2.resize(mask, (resize_w, resize_h), interpolation=cv2.INTER_NEAREST)
+    return img, mask
+
+
+# -----------------------------------------------------------------------------
+# Manual augmentation helpers (mmseg style)
+# -----------------------------------------------------------------------------
+
+
+def _random_crop(
+    img: np.ndarray,
+    mask: np.ndarray,
+    crop_size: Tuple[int, int],
+    *,
+    cat_max_ratio: float = 0.75,
+    ignore_index: int = 255,
+    num_attempts: int = 10,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Random crop with category ratio constraint (mimics mmseg RandomCrop).
+
+    Ensures that no single class occupies more than ``cat_max_ratio`` of the
+    cropped area. Falls back to the last sampled crop if the constraint cannot
+    be satisfied after ``num_attempts`` trials.
+    """
+
+    ch, cw = crop_size[1], crop_size[0]
+    h, w = mask.shape
+
+    if h < ch or w < cw:
+        img, mask = _pad_to_size(img, mask, crop_size, ignore_index)
+        h, w = mask.shape  # 패딩 후 크기 갱신
+
+    for attempt in range(num_attempts):
+        top = random.randint(0, h - ch)
+        left = random.randint(0, w - cw)
+        img_crop = img[top : top + ch, left : left + cw]
+        mask_crop = mask[top : top + ch, left : left + cw]
+
+        valid = (mask_crop != ignore_index)
+        if not np.any(valid):
+            max_ratio = 0.0  # nothing but ignore pixels
+        else:
+            labels, counts = np.unique(mask_crop[valid], return_counts=True)
+            max_ratio = counts.max() / counts.sum()  # ignore_index 완전히 제외
+
+        if max_ratio < cat_max_ratio:
+            return img_crop, mask_crop
+
+    # fallback
+    return img_crop, mask_crop
+
+
+def _photo_metric_distortion(img: np.ndarray) -> np.ndarray:
+    """Simplified PhotoMetricDistortion (brightness/contrast/hue/sat)."""
+
+    img = img.astype(np.float32)
+
+    # random brightness
+    if random.random() < 0.5:
+        delta = random.uniform(-32, 32)
+        img += delta
+
+    # mode: 0 → contrast 마지막, 1 → contrast 먼저 (mmseg 공식)
+    mode = random.randint(0, 1)
+
+    def _rand_contrast(inp: np.ndarray) -> np.ndarray:
+        if random.random() < 0.5:
+            alpha = random.uniform(0.5, 1.5)
+            return inp * alpha
+        return inp
+
+    if mode == 1:
+        img = _rand_contrast(img)
+
+    # convert to HSV for saturation & hue
+    img_hsv = cv2.cvtColor(np.clip(img, 0, 255).astype(np.uint8), cv2.COLOR_RGB2HSV).astype(np.float32)
+
+    # saturation
+    if random.random() < 0.5:
+        img_hsv[..., 1] *= random.uniform(0.5, 1.5)
+
+    # hue shift
+    if random.random() < 0.5:
+        img_hsv[..., 0] += random.uniform(-18, 18)
+        img_hsv[..., 0] = np.mod(img_hsv[..., 0], 180)
+
+    img = cv2.cvtColor(np.clip(img_hsv, 0, 255).astype(np.uint8), cv2.COLOR_HSV2RGB).astype(np.float32)
+
+    if mode == 0:
+        img = _rand_contrast(img)
+
+    return np.clip(img, 0, 255)
+
+
+def _normalize(img: np.ndarray) -> np.ndarray:
+    img = img.astype(np.float32)
+    img = (img - IMG_NORM_MEAN) / IMG_NORM_STD
+    return img
+
+
+def _pad_to_size(img: np.ndarray, mask: np.ndarray, crop_size: Tuple[int, int], ignore_index: int) -> Tuple[np.ndarray, np.ndarray]:
+    ch, cw = crop_size[1], crop_size[0]
+    h, w = mask.shape
+    pad_h = max(ch - h, 0)
+    pad_w = max(cw - w, 0)
+    if pad_h > 0 or pad_w > 0:
+        img = cv2.copyMakeBorder(img, 0, pad_h, 0, pad_w, cv2.BORDER_CONSTANT, value=0)
+        mask = cv2.copyMakeBorder(mask, 0, pad_h, 0, pad_w, cv2.BORDER_CONSTANT, value=ignore_index)
+    return img, mask
+
+
+def _train_transform(
+    img: np.ndarray,
+    mask: np.ndarray,
+    crop_size: Tuple[int, int],
+    ignore_index: int,
+) -> Tuple[np.ndarray, np.ndarray]:
+    # 1. Random scale w.r.t base scale 2048x512
+    #    ratio: float ∈ [0.5, 2.0]
+    #    img/mask dtype: uint8, value range 0–255 (unchanged)
+    ratio = random.uniform(0.5, 2.0)
+    new_w = int(_IMG_SCALE[0] * ratio)
+    new_h = int(_IMG_SCALE[1] * ratio)
     img = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
     mask = cv2.resize(mask, (new_w, new_h), interpolation=cv2.INTER_NEAREST)
-    return img, mask 
+
+    # ensure image >= crop_size
+    if new_h < crop_size[1] or new_w < crop_size[0]:
+        img, mask = _pad_to_size(img, mask, crop_size, ignore_index)
+        new_h, new_w = img.shape[:2]
+
+    # 2. Random crop with category max ratio (safe)
+    img, mask = _random_crop(img, mask, crop_size, cat_max_ratio=0.75, ignore_index=ignore_index)
+    # If random_crop returned same size because of constraints, ensure final size not smaller
+    img, mask = _pad_to_size(img, mask, crop_size, ignore_index)
+
+    # 3. Random horizontal flip
+    #    probability: 0.5
+    #    dtype/value range unchanged
+    if random.random() < 0.5:
+        img = np.fliplr(img).copy()
+        mask = np.fliplr(mask).copy()
+
+    # 4. Photo-metric distortion
+    #    brightness delta: int ∈ [-32, 32]
+    #    contrast alpha: float ∈ [0.5, 1.5]
+    #    saturation factor: float ∈ [0.5, 1.5]
+    #    hue shift: int ∈ [-18, 18] (HSV space)
+    #    img converted to float32 during this step, value range 0–255 before clipping
+    img = _photo_metric_distortion(img)
+
+    # 5. Normalize
+    #    mean: [123.675, 116.28, 103.53]
+    #    std:  [58.395, 57.12, 57.375]
+    #    output img dtype float32, roughly in range ~[-2, +2]
+    img = _normalize(img)
+
+    # 6. Pad to crop size (default 512×512)
+    #    img pad value: 0 (float32 after norm), mask pad value: ignore_index (=255)
+    img, mask = _pad_to_size(img, mask, crop_size, ignore_index)
+
+    return img, mask
+
+
+def _val_transform(
+    img: np.ndarray,
+    mask: np.ndarray,
+    crop_size: Tuple[int, int],
+    ignore_index: int,
+) -> Tuple[np.ndarray, np.ndarray]:
+    img, mask = _resize(img, mask)
+
+    # normalize
+    img = _normalize(img)
+
+    # pad
+    img, mask = _pad_to_size(img, mask, crop_size, ignore_index)
+
+    return img, mask
+
+ 
