@@ -16,6 +16,7 @@ from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 from torchvision import datasets, transforms
 from torchvision.transforms import InterpolationMode
+from torch.utils.tensorboard import SummaryWriter
 
 from models.dat_classifier import DatClassifier
 from datasets.imagenet import get_imagenet_dataloader
@@ -61,7 +62,21 @@ def accuracy(output, target, topk=(1,)):
         return res
 
 
-def train_one_epoch(model, loader, criterion, optimizer, device, epoch, mixup_cutmix=None, log_interval=100):
+def log_weight_stats(model, writer, step):
+    """Record weight statistics and update ratio to TensorBoard."""
+    for name, param in model.named_parameters():
+        if not param.requires_grad:
+            continue
+        data = param.data
+        writer.add_scalar(f"weights/{name}/mean", data.mean().item(), step)
+        writer.add_scalar(f"weights/{name}/std", data.std().item(), step)
+        writer.add_scalar(f"weights/{name}/L2_norm", data.norm().item(), step)
+        if param.grad is not None:
+            update_ratio = (param.grad.norm() / (data.norm() + 1e-8)).item()
+            writer.add_scalar(f"grads/{name}/update_ratio", update_ratio, step)
+
+
+def train_one_epoch(model, loader, criterion, optimizer, device, epoch, *, writer=None, global_step=0, mixup_cutmix=None, log_interval=100):
     model.train()
     running_loss = 0.0
     running_acc1 = 0.0
@@ -82,12 +97,22 @@ def train_one_epoch(model, loader, criterion, optimizer, device, epoch, mixup_cu
         running_loss += loss.item()
         running_acc1 += acc1.item()
 
+        global_step += 1
+        if writer is not None:
+            writer.add_scalar("train/loss", loss.item(), global_step)
+            writer.add_scalar("train/acc1", acc1.item(), global_step)
+            writer.add_scalar("train/lr", optimizer.param_groups[0]["lr"], global_step)
+            if (i + 1) % log_interval == 0:
+                log_weight_stats(model, writer, global_step)
+
         if (i + 1) % log_interval == 0:
             print(
                 f"[Epoch {epoch}] Step {i + 1}/{len(loader)}  "
                 f"Loss: {running_loss / (i + 1):.4f}  "
                 f"Acc@1: {running_acc1 / (i + 1):.2f}%"
             )
+
+    return global_step
 
 
 def validate(model, loader, criterion, device):
@@ -155,16 +180,38 @@ def main():
 
     train_sampler = train_loader.sampler if args.distributed else None
 
+    # TensorBoard writer (rank 0)
+    if not args.distributed or torch.distributed.get_rank() == 0:
+        writer = SummaryWriter(log_dir=args.output)
+    else:
+        writer = None
+
     best_acc1 = 0.0
+    global_step = 0
     for epoch in range(1, args.epochs + 1):
         if args.distributed:
             train_sampler.set_epoch(epoch)
 
-        train_one_epoch(
-            model, train_loader, criterion, optimizer, device, epoch, mixup_cutmix=mixup_cutmix
+        global_step = train_one_epoch(
+            model,
+            train_loader,
+            criterion,
+            optimizer,
+            device,
+            epoch,
+            writer=writer,
+            global_step=global_step,
+            mixup_cutmix=mixup_cutmix,
         )
         val_loss, val_acc1, val_acc5 = validate(model, val_loader, criterion, device)
         scheduler.step()
+
+        if writer is not None:
+            writer.add_scalar("val/loss", val_loss, epoch)
+            writer.add_scalar("val/acc1", val_acc1, epoch)
+            writer.add_scalar("val/acc5", val_acc5, epoch)
+            log_weight_stats(model, writer, epoch)
+            writer.flush()
 
         if not args.distributed or torch.distributed.get_rank() == 0:
             print(
@@ -187,6 +234,9 @@ def main():
                 best_path = Path(args.output) / "best.pth"
                 torch.save(model.state_dict(), best_path)
                 print(f"New best Acc@1: {best_acc1:.2f}%, checkpoint saved to {best_path}")
+
+    if writer is not None:
+        writer.close()
 
 
 if __name__ == "__main__":
