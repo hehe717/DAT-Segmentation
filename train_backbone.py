@@ -73,7 +73,7 @@ def train_one_epoch(model, loader, criterion, optimizer, device, epoch, mixup_cu
             imgs, labels = mixup_cutmix((imgs, labels))
 
         optimizer.zero_grad(set_to_none=True)
-        outputs, _, _ = model(imgs)
+        outputs = model(imgs)
         loss = criterion(outputs, labels)
         loss.backward()
         optimizer.step()
@@ -98,7 +98,7 @@ def validate(model, loader, criterion, device):
     with torch.no_grad():
         for imgs, labels in loader:
             imgs, labels = imgs.to(device, non_blocking=True), labels.to(device, non_blocking=True)
-            outputs, _, _ = model(imgs)
+            outputs = model(imgs)
             loss = criterion(outputs, labels)
             acc1, acc5 = accuracy(outputs, labels, topk=(1, 5))
             loss_sum += loss.item()
@@ -170,16 +170,18 @@ def main():
             print(
                 f"[Epoch {epoch}] Val Loss: {val_loss:.4f}  Acc@1: {val_acc1:.2f}%  Acc@5: {val_acc5:.2f}%"
             )
-            ckpt_path = Path(args.output) / f"epoch_{epoch}.pth"
-            torch.save(
-                {
-                    "epoch": epoch,
-                    "model_state": model.state_dict(),
-                    "optimizer_state": optimizer.state_dict(),
-                    "acc1": val_acc1,
-                },
-                ckpt_path,
-            )
+            # 10에폭마다 체크포인트 저장
+            if epoch % 10 == 0:
+                ckpt_path = Path(args.output) / f"epoch_{epoch}.pth"
+                torch.save(
+                    {
+                        "epoch": epoch,
+                        "model_state": model.state_dict(),
+                        "optimizer_state": optimizer.state_dict(),
+                        "acc1": val_acc1,
+                    },
+                    ckpt_path,
+                )
             if val_acc1 > best_acc1:
                 best_acc1 = val_acc1
                 best_path = Path(args.output) / "best.pth"

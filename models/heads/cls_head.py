@@ -17,7 +17,7 @@ class ClsHead(nn.Module):
         4. FC 로짓 층
 
     입력 `x` 는 (B,C,H,W) 또는 feature map 리스트 모두 허용.
-    원본 DAT 분류기와 동일하게 `(logits, None, None)` 형태로 반환하도록 옵션을 둔다.
+    이제 항상 로짓(`logits`) 텐서 하나만 반환한다.
     """
 
     def __init__(
@@ -26,14 +26,12 @@ class ClsHead(nn.Module):
         num_classes: int,
         *,
         dropout_ratio: float = 0.0,
-        return_tuple: bool = True,
     ) -> None:
         super().__init__()
         self.norm = LayerNormProxy(in_channels)
         self.pool = nn.AdaptiveAvgPool2d(1)
         self.dropout = nn.Dropout(dropout_ratio) if dropout_ratio > 0 else nn.Identity()
         self.fc = nn.Linear(in_channels, num_classes)
-        self.return_tuple = return_tuple
 
     def forward(self, x: Union[torch.Tensor, Sequence[torch.Tensor]]):  # type: ignore
         # Allow passing list/tuple of feature maps
@@ -45,7 +43,4 @@ class ClsHead(nn.Module):
         x = torch.flatten(x, 1)
         x = self.dropout(x)
         logits = self.fc(x)
-
-        if self.return_tuple:
-            return logits, None, None
         return logits 
