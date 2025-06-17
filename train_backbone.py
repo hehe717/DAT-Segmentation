@@ -21,11 +21,6 @@ from torch.utils.tensorboard import SummaryWriter
 from models.dat_classifier import DatClassifier
 from datasets.imagenet import get_imagenet_dataloader
 
-# --------------------------------------------------
-# Label smoothing loss (works with Mixup/Cutmix tuples)
-# --------------------------------------------------
-
-
 class LabelSmoothingCrossEntropy(torch.nn.Module):
     """Cross-entropy with label smoothing and Mixup/Cutmix tuple support."""
 
@@ -34,7 +29,7 @@ class LabelSmoothingCrossEntropy(torch.nn.Module):
         self.smoothing = smoothing
 
     def forward(self, pred: torch.Tensor, target):
-        if isinstance(target, tuple):  # mixup / cutmix
+        if isinstance(target, tuple):
             target_a, target_b, lam = target
             return lam * self._smooth_loss(pred, target_a) + (1 - lam) * self._smooth_loss(pred, target_b)
         return self._smooth_loss(pred, target)
@@ -46,9 +41,8 @@ class LabelSmoothingCrossEntropy(torch.nn.Module):
         smooth_target.scatter_(1, target.unsqueeze(1), 1.0 - self.smoothing)
         return torch.mean(torch.sum(-smooth_target * log_prob, dim=-1))
 
-
 def accuracy(output, target, topk=(1,)):
-    """top-k 정확도 산출"""
+    """Compute top-k accuracy"""
     with torch.no_grad():
         maxk = max(topk)
         batch_size = target.size(0)
@@ -83,7 +77,6 @@ def train_one_epoch(model, loader, criterion, optimizer, device, epoch, *, write
     for i, (imgs, labels) in enumerate(loader):
         imgs, labels = imgs.to(device, non_blocking=True), labels.to(device, non_blocking=True)
 
-        # Apply Mixup/Cutmix after moving to device
         if mixup_cutmix is not None:
             imgs, labels = mixup_cutmix((imgs, labels))
 
@@ -180,7 +173,7 @@ def main():
 
     train_sampler = train_loader.sampler if args.distributed else None
 
-    # TensorBoard writer (rank 0)
+    # TensorBoard writer
     if not args.distributed or torch.distributed.get_rank() == 0:
         writer = SummaryWriter(log_dir=args.output)
     else:
@@ -217,7 +210,7 @@ def main():
             print(
                 f"[Epoch {epoch}] Val Loss: {val_loss:.4f}  Acc@1: {val_acc1:.2f}%  Acc@5: {val_acc5:.2f}%"
             )
-            # 10에폭마다 체크포인트 저장
+            # Save checkpoint every 10 epochs
             if epoch % 10 == 0:
                 ckpt_path = Path(args.output) / f"epoch_{epoch}.pth"
                 torch.save(
