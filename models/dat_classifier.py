@@ -16,7 +16,8 @@ class DatClassifier(nn.Module):
     def __init__(self, num_classes: int = 1000, pretrained: str | None = None) -> None:
         super().__init__()
         backbone_cfg = self._load_backbone_cfg().copy()
-        backbone_cfg["init_cfg"] = dict(type="Pretrained", checkpoint=pretrained)
+        if pretrained:
+            backbone_cfg["init_cfg"] = dict(type="Pretrained", checkpoint=pretrained)
 
         self.backbone = DAT(**backbone_cfg, num_classes=num_classes)
         self.head = ClsHead(in_channels=backbone_cfg["dims"][-1], num_classes=num_classes)
