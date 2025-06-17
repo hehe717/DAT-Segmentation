@@ -12,7 +12,6 @@ from torchvision import transforms
 
 __all__ = [
     "get_imagenet_dataloader",
-    "LabelSmoothingCrossEntropy",
     "MixupCutmix",
 ]
 
@@ -182,29 +181,4 @@ def get_imagenet_dataloader(
     )
 
     mixup_cutmix = MixupCutmix() if use_mixup_cutmix else None
-    return train_loader, val_loader, mixup_cutmix
-
-
-# --------------------------------------------------
-# Label smoothing loss (works with mixup/cutmix tuples)
-# --------------------------------------------------
-
-class LabelSmoothingCrossEntropy(torch.nn.Module):
-    """Cross-entropy with label smoothing and Mixup/Cutmix tuple support."""
-
-    def __init__(self, smoothing: float = 0.1):
-        super().__init__()
-        self.smoothing = smoothing
-
-    def forward(self, pred: torch.Tensor, target):
-        if isinstance(target, tuple):  # mixup / cutmix
-            target_a, target_b, lam = target
-            return lam * self._smooth_loss(pred, target_a) + (1 - lam) * self._smooth_loss(pred, target_b)
-        return self._smooth_loss(pred, target)
-
-    def _smooth_loss(self, pred: torch.Tensor, target: torch.Tensor):  # noqa: WPS110
-        num_classes = pred.size(-1)
-        log_prob = torch.nn.functional.log_softmax(pred, dim=-1)
-        smooth_target = torch.zeros_like(log_prob).fill_(self.smoothing / (num_classes - 1))
-        smooth_target.scatter_(1, target.unsqueeze(1), 1.0 - self.smoothing)
-        return torch.mean(torch.sum(-smooth_target * log_prob, dim=-1)) 
+    return train_loader, val_loader, mixup_cutmix 

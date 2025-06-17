@@ -18,8 +18,32 @@ from torchvision import datasets, transforms
 from torchvision.transforms import InterpolationMode
 
 from models.dat_classifier import DatClassifier
-from datasets.imagenet_dataloader import get_imagenet_dataloader, LabelSmoothingCrossEntropy
+from datasets.imagenet import get_imagenet_dataloader
 
+# --------------------------------------------------
+# Label smoothing loss (works with Mixup/Cutmix tuples)
+# --------------------------------------------------
+
+
+class LabelSmoothingCrossEntropy(torch.nn.Module):
+    """Cross-entropy with label smoothing and Mixup/Cutmix tuple support."""
+
+    def __init__(self, smoothing: float = 0.1):
+        super().__init__()
+        self.smoothing = smoothing
+
+    def forward(self, pred: torch.Tensor, target):
+        if isinstance(target, tuple):  # mixup / cutmix
+            target_a, target_b, lam = target
+            return lam * self._smooth_loss(pred, target_a) + (1 - lam) * self._smooth_loss(pred, target_b)
+        return self._smooth_loss(pred, target)
+
+    def _smooth_loss(self, pred: torch.Tensor, target: torch.Tensor):  # noqa: WPS110
+        num_classes = pred.size(-1)
+        log_prob = torch.nn.functional.log_softmax(pred, dim=-1)
+        smooth_target = torch.zeros_like(log_prob).fill_(self.smoothing / (num_classes - 1))
+        smooth_target.scatter_(1, target.unsqueeze(1), 1.0 - self.smoothing)
+        return torch.mean(torch.sum(-smooth_target * log_prob, dim=-1))
 
 
 def accuracy(output, target, topk=(1,)):
