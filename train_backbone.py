@@ -44,6 +44,8 @@ class LabelSmoothingCrossEntropy(torch.nn.Module):
 def accuracy(output, target, topk=(1,)):
     """Compute top-k accuracy"""
     with torch.no_grad():
+        if isinstance(target, tuple):
+            target = target[0]  # Mixup/Cutmix returns tuple
         maxk = max(topk)
         batch_size = target.size(0)
         _, pred = output.topk(maxk, 1, True, True)
