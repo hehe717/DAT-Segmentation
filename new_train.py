@@ -11,7 +11,7 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader, DistributedSampler
 
 from models.builder import build_model_from_config
-from datasets.datasets import ADE20KDataset
+from datasets.ade20k import ADE20KDataset
 import torch.distributed as dist
 from models.backbones.loading import load_checkpoint
 import numpy as np
