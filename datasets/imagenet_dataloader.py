@@ -24,9 +24,9 @@ def _get_train_transforms() -> transforms.Compose:  # noqa: WPS430
     """Return the default training transforms following NVLabs recipe."""
     return transforms.Compose(
         [
-            transforms.RandomResizedCrop(224),
+            transforms.RandomResizedCrop(224, interpolation=transforms.InterpolationMode.BICUBIC),
             transforms.RandomHorizontalFlip(),
-            # RandAugment (2 ops, magnitude 9)
+            transforms.ColorJitter(0.4, 0.4, 0.4, 0.0),
             transforms.RandAugment(num_ops=2, magnitude=9, num_magnitude_bins=31),
             transforms.ToTensor(),
             transforms.RandomErasing(p=0.25, scale=(0.02, 0.33), ratio=(0.3, 3.3)),
@@ -152,7 +152,7 @@ def get_imagenet_dataloader(
         split="val",
         transform=transforms.Compose(
             [
-                transforms.Resize(256),
+                transforms.Resize(256, interpolation=transforms.InterpolationMode.BICUBIC),
                 transforms.CenterCrop(224),
                 transforms.ToTensor(),
                 transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
