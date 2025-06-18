@@ -27,6 +27,7 @@ model = dict(
         ksizes=[9, 7, 5, 3],
         nat_ksizes=[7, 7, 7, 7],
         drop_path_rate=0.3,
+        use_checkpoint=False,
         init_cfg=dict(type='Pretrained', checkpoint=pretrained)
     ),
     decode_head=dict(
