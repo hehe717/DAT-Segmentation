@@ -44,8 +44,7 @@ class LabelSmoothingCrossEntropy(torch.nn.Module):
 def accuracy(output, target, topk=(1,)):
     """Compute top-k accuracy"""
     with torch.no_grad():
-        if isinstance(target, tuple):
-            target = target[0]  # Mixup/Cutmix returns tuple
+        target = target[0]
         maxk = max(topk)
         batch_size = target.size(0)
         _, pred = output.topk(maxk, 1, True, True)
@@ -72,7 +71,7 @@ def log_weight_stats(model, writer, step):
             writer.add_scalar(f"grads/{name}/update_ratio", update_ratio, step)
 
 
-def train_one_epoch(model, loader, criterion, optimizer, device, epoch, *, writer=None, global_step=0, mixup_cutmix=None, log_interval=100):
+def train_one_epoch(model, loader, criterion, optimizer, device, epoch, *, writer=None, global_step=0, mixup_cutmix=None, log_interval=100, scheduler=None):
     model.train()
     running_loss = 0.0
     running_acc1 = 0.0
@@ -87,6 +86,9 @@ def train_one_epoch(model, loader, criterion, optimizer, device, epoch, *, write
         loss = criterion(outputs, labels)
         loss.backward()
         optimizer.step()
+
+        if scheduler is not None:
+            scheduler.step()
 
         acc1, _ = accuracy(outputs, labels, topk=(1, 5))
         running_loss += loss.item()
@@ -133,9 +135,9 @@ def main():
     parser.add_argument("--data", required=True, help="ImageNet root directory")
     parser.add_argument("--epochs", default=300, type=int)
     parser.add_argument("--batch-size", default=128, type=int)
-    parser.add_argument("--lr", default=0.0001, type=float)
+    parser.add_argument("--lr", default=0.00006, type=float)
     parser.add_argument("--workers", default=32, type=int)
-    parser.add_argument("--weight-decay", default=0.05, type=float)
+    parser.add_argument("--weight-decay", default=0.01, type=float)
     parser.add_argument("--pretrained", default=None, help="Path to pretrained DAT checkpoint")
     parser.add_argument("--output", default="./logs", help="Checkpoint and log directory")
     parser.add_argument("--distributed", action="store_true")
@@ -159,11 +161,29 @@ def main():
 
     criterion = LabelSmoothingCrossEntropy(smoothing=0.1).to(device)
 
-    optimizer = optim.AdamW(
-        model.parameters(), lr=args.lr, weight_decay=args.weight_decay
-    )
+    no_decay_keywords = [
+        "absolute_pos_embed",
+        "relative_position_bias_table",
+        "rpe_table",
+        "norm",
+    ]
 
-    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
+    decay_params = []
+    no_decay_params = []
+    for name, param in model.named_parameters():
+        if not param.requires_grad:
+            continue
+        if any(k in name for k in no_decay_keywords):
+            no_decay_params.append(param)
+        else:
+            decay_params.append(param)
+
+    param_groups = [
+        {"params": no_decay_params, "weight_decay": 0.0},
+        {"params": decay_params, "weight_decay": args.weight_decay},
+    ]
+
+    optimizer = optim.AdamW(param_groups, lr=args.lr, betas=(0.9, 0.999))
 
     train_loader, val_loader, mixup_cutmix = get_imagenet_dataloader(
         args.data,
@@ -174,6 +194,22 @@ def main():
     )
 
     train_sampler = train_loader.sampler if args.distributed else None
+
+    total_iters = args.epochs * len(train_loader)
+
+    # Poly learning rate schedule with linear warm-up (by iteration)
+    warmup_iters = 1500
+    warmup_ratio = 1e-6
+    power = 1.0
+
+    def lr_lambda(current_iter: int):  # noqa: WPS430
+        if current_iter < warmup_iters:
+            return warmup_ratio + (1 - warmup_ratio) * current_iter / warmup_iters
+        else:
+            progress = (current_iter - warmup_iters) / max(1, total_iters - warmup_iters)
+            return (1 - progress) ** power
+
+    scheduler = optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lr_lambda)
 
     # TensorBoard writer
     if not args.distributed or torch.distributed.get_rank() == 0:
@@ -197,9 +233,9 @@ def main():
             writer=writer,
             global_step=global_step,
             mixup_cutmix=mixup_cutmix,
+            scheduler=scheduler,
         )
         val_loss, val_acc1, val_acc5 = validate(model, val_loader, criterion, device)
-        scheduler.step()
 
         if writer is not None:
             writer.add_scalar("val/loss", val_loss, epoch)
@@ -212,23 +248,23 @@ def main():
             print(
                 f"[Epoch {epoch}] Val Loss: {val_loss:.4f}  Acc@1: {val_acc1:.2f}%  Acc@5: {val_acc5:.2f}%"
             )
-            # Save checkpoint every 10 epochs
-            if epoch % 10 == 0:
-                ckpt_path = Path(args.output) / f"epoch_{epoch}.pth"
-                torch.save(
-                    {
-                        "epoch": epoch,
-                        "model_state": model.state_dict(),
-                        "optimizer_state": optimizer.state_dict(),
-                        "acc1": val_acc1,
-                    },
-                    ckpt_path,
-                )
-            if val_acc1 > best_acc1:
-                best_acc1 = val_acc1
-                best_path = Path(args.output) / "best.pth"
-                torch.save(model.state_dict(), best_path)
-                print(f"New best Acc@1: {best_acc1:.2f}%, checkpoint saved to {best_path}")
+
+        if epoch % 10 == 0:
+            ckpt_path = Path(args.output) / f"epoch_{epoch}.pth"
+            torch.save(
+                {
+                    "epoch": epoch,
+                    "model_state": model.state_dict(),
+                    "optimizer_state": optimizer.state_dict(),
+                    "acc1": val_acc1,
+                },
+                ckpt_path,
+            )
+        if val_acc1 > best_acc1:
+            best_acc1 = val_acc1
+            best_path = Path(args.output) / "best.pth"
+            torch.save(model.state_dict(), best_path)
+            print(f"New best Acc@1: {best_acc1:.2f}%, checkpoint saved to {best_path}")
 
     if writer is not None:
         writer.close()
