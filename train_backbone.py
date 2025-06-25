@@ -34,7 +34,7 @@ class LabelSmoothingCrossEntropy(torch.nn.Module):
             return lam * self._smooth_loss(pred, target_a) + (1 - lam) * self._smooth_loss(pred, target_b)
         return self._smooth_loss(pred, target)
 
-    def _smooth_loss(self, pred: torch.Tensor, target: torch.Tensor):  # noqa: WPS110
+    def _smooth_loss(self, pred: torch.Tensor, target: torch.Tensor):
         num_classes = pred.size(-1)
         log_prob = torch.nn.functional.log_softmax(pred, dim=-1)
         smooth_target = torch.zeros_like(log_prob).fill_(self.smoothing / (num_classes - 1))
@@ -87,7 +87,7 @@ def log_weight_stats(model, writer, step):
             writer.add_scalar(f"grads/{name}/update_ratio", update_ratio, step)
 
 
-def train_one_epoch(model, loader, criterion, optimizer, device, epoch, *, writer=None, global_step=0, mixup_cutmix=None, log_interval=100, scheduler=None):
+def train_one_epoch(model, loader, criterion, optimizer, device, epoch, *, writer=None, global_step=0, mixup_cutmix=None, log_interval=100, scheduler=None, clip_grad=None):
     model.train()
     running_loss = 0.0
     running_acc1 = 0.0
@@ -101,6 +101,11 @@ def train_one_epoch(model, loader, criterion, optimizer, device, epoch, *, write
         outputs = model(imgs)
         loss = criterion(outputs, labels)
         loss.backward()
+
+        # ---------------- Gradient clipping ----------------
+        if clip_grad is not None and clip_grad > 0:
+            torch.nn.utils.clip_grad_norm_(model.parameters(), clip_grad)
+        # ---------------- Optimizer step ----------------
         optimizer.step()
 
         if scheduler is not None:
@@ -151,9 +156,15 @@ def main():
     parser.add_argument("--data", required=True, help="ImageNet root directory")
     parser.add_argument("--epochs", default=300, type=int)
     parser.add_argument("--batch-size", default=128, type=int)
-    parser.add_argument("--lr", default=0.00006, type=float)
+    parser.add_argument("--lr", default=5e-4, type=float, help="Base learning rate")
+    parser.add_argument("--warmup-epochs", default=20, type=int, help="Number of warm-up epochs")
+    parser.add_argument("--warmup-lr", default=5e-7, type=float, help="Starting LR for warm-up")
+    parser.add_argument("--min-lr", default=5e-6, type=float, help="Minimum LR after decay")
+    parser.add_argument("--decay-epochs", default=30, type=int, help="Epoch interval for LR decay")
+    parser.add_argument("--decay-rate", default=0.1, type=float, help="LR decay rate (gamma)")
+    parser.add_argument("--clip-grad", default=5.0, type=float, help="Gradient clipping norm (0 to disable)")
     parser.add_argument("--workers", default=32, type=int)
-    parser.add_argument("--weight-decay", default=0.01, type=float)
+    parser.add_argument("--weight-decay", default=0.05, type=float)
     parser.add_argument("--pretrained", default=None, help="Path to pretrained DAT checkpoint")
     parser.add_argument("--output", default="./logs", help="Checkpoint and log directory")
     parser.add_argument("--distributed", action="store_true")
@@ -211,19 +222,28 @@ def main():
 
     train_sampler = train_loader.sampler if args.distributed else None
 
-    total_iters = args.epochs * len(train_loader)
+    # ---------------- LR SCHEDULER (warm-up + step decay) ----------------
+    num_steps_per_epoch = len(train_loader)
+    warmup_iters = args.warmup_epochs * num_steps_per_epoch
+    total_iters = args.epochs * num_steps_per_epoch
 
-    # Poly learning rate schedule with linear warm-up (by iteration)
-    warmup_iters = 1500
-    warmup_ratio = 1e-6
-    power = 1.0
+    warmup_ratio = args.warmup_lr / args.lr  # e.g. 5e-7 / 5e-4 = 1e-3
 
-    def lr_lambda(current_iter: int):  # noqa: WPS430
+    def lr_lambda(current_iter: int):
+        """Return LR multiplier for given iteration."""
         if current_iter < warmup_iters:
+            # Linear warm-up
             return warmup_ratio + (1 - warmup_ratio) * current_iter / warmup_iters
-        else:
-            progress = (current_iter - warmup_iters) / max(1, total_iters - warmup_iters)
-            return (1 - progress) ** power
+
+        # After warm-up: step decay by epoch
+        completed_iter_after_warmup = current_iter - warmup_iters
+        completed_epochs = completed_iter_after_warmup // num_steps_per_epoch
+        decay_steps = completed_epochs // args.decay_epochs
+        factor = args.decay_rate ** decay_steps
+
+        # Respect minimum LR
+        min_factor = args.min_lr / args.lr
+        return max(min_factor, factor)
 
     scheduler = optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lr_lambda)
 
@@ -250,6 +270,7 @@ def main():
             global_step=global_step,
             mixup_cutmix=mixup_cutmix,
             scheduler=scheduler,
+            clip_grad=args.clip_grad,
         )
         val_loss, val_acc1, val_acc5 = validate(model, val_loader, criterion, device)
 
