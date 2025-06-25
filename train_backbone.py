@@ -1,9 +1,4 @@
 #!/usr/bin/env python
-"""train_backbone.py
-DAT 백본과 ClsHead 를 결합하여 ImageNet (ILSVRC-2012) 분류 학습을 수행하는 스크립트.
-사용 예)
-    python train_backbone.py --data /path/to/imagenet --batch-size 256 --epochs 300
-"""
 
 import argparse
 import os
@@ -22,7 +17,6 @@ from models.dat_classifier import DatClassifier
 from datasets.imagenet import get_imagenet_dataloader
 
 class LabelSmoothingCrossEntropy(torch.nn.Module):
-    """Cross-entropy with label smoothing and Mixup/Cutmix tuple support."""
 
     def __init__(self, smoothing: float = 0.1):
         super().__init__()
@@ -42,7 +36,6 @@ class LabelSmoothingCrossEntropy(torch.nn.Module):
         return torch.mean(torch.sum(-smooth_target * log_prob, dim=-1))
 
 def accuracy(output, target, topk=(1,)):
-    """Compute top-k accuracy"""
     with torch.no_grad():
         if isinstance(target, tuple):
             target_a, target_b, lam = target
@@ -72,9 +65,7 @@ def accuracy(output, target, topk=(1,)):
 
         return res
 
-
 def log_weight_stats(model, writer, step):
-    """Record weight statistics and update ratio to TensorBoard."""
     for name, param in model.named_parameters():
         if not param.requires_grad:
             continue
@@ -85,7 +76,6 @@ def log_weight_stats(model, writer, step):
         if param.grad is not None:
             update_ratio = (param.grad.norm() / (data.norm() + 1e-8)).item()
             writer.add_scalar(f"grads/{name}/update_ratio", update_ratio, step)
-
 
 def train_one_epoch(model, loader, criterion, optimizer, device, epoch, *, writer=None, global_step=0, mixup_cutmix=None, log_interval=100, scheduler=None, clip_grad=None):
     model.train()
@@ -102,10 +92,8 @@ def train_one_epoch(model, loader, criterion, optimizer, device, epoch, *, write
         loss = criterion(outputs, labels)
         loss.backward()
 
-        # ---------------- Gradient clipping ----------------
         if clip_grad is not None and clip_grad > 0:
             torch.nn.utils.clip_grad_norm_(model.parameters(), clip_grad)
-        # ---------------- Optimizer step ----------------
         optimizer.step()
 
         if scheduler is not None:
@@ -222,26 +210,21 @@ def main():
 
     train_sampler = train_loader.sampler if args.distributed else None
 
-    # ---------------- LR SCHEDULER (warm-up + step decay) ----------------
     num_steps_per_epoch = len(train_loader)
     warmup_iters = args.warmup_epochs * num_steps_per_epoch
     total_iters = args.epochs * num_steps_per_epoch
 
-    warmup_ratio = args.warmup_lr / args.lr  # e.g. 5e-7 / 5e-4 = 1e-3
+    warmup_ratio = args.warmup_lr / args.lr
 
     def lr_lambda(current_iter: int):
-        """Return LR multiplier for given iteration."""
         if current_iter < warmup_iters:
-            # Linear warm-up
             return warmup_ratio + (1 - warmup_ratio) * current_iter / warmup_iters
 
-        # After warm-up: step decay by epoch
         completed_iter_after_warmup = current_iter - warmup_iters
         completed_epochs = completed_iter_after_warmup // num_steps_per_epoch
         decay_steps = completed_epochs // args.decay_epochs
         factor = args.decay_rate ** decay_steps
 
-        # Respect minimum LR
         min_factor = args.min_lr / args.lr
         return max(min_factor, factor)
 
