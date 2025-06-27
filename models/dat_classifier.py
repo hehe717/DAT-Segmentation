@@ -20,7 +20,7 @@ class DatClassifier(nn.Module):
             backbone_cfg["init_cfg"] = dict(type="Pretrained", checkpoint=pretrained)
 
         self.backbone = DAT(**backbone_cfg, num_classes=num_classes)
-        self.head = ClsHead(in_channels=backbone_cfg["dims"][-1], num_classes=num_classes)
+        self.head = ClsHead(in_channels=backbone_cfg["dims"], num_classes=num_classes)
 
     @staticmethod
     def _load_backbone_cfg() -> dict:
