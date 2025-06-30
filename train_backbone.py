@@ -148,8 +148,7 @@ def main():
     parser.add_argument("--warmup-epochs", default=20, type=int, help="Number of warm-up epochs")
     parser.add_argument("--warmup-lr", default=5e-7, type=float, help="Starting LR for warm-up")
     parser.add_argument("--min-lr", default=5e-6, type=float, help="Minimum LR after decay")
-    parser.add_argument("--decay-epochs", default=30, type=int, help="Epoch interval for LR decay")
-    parser.add_argument("--decay-rate", default=0.1, type=float, help="LR decay rate (gamma)")
+    parser.add_argument("--poly-power", default=0.9, type=float, help="Power for polynomial LR decay")
     parser.add_argument("--clip-grad", default=5.0, type=float, help="Gradient clipping norm (0 to disable)")
     parser.add_argument("--workers", default=32, type=int)
     parser.add_argument("--weight-decay", default=0.05, type=float)
@@ -219,12 +218,8 @@ def main():
     def lr_lambda(current_iter: int):
         if current_iter < warmup_iters:
             return warmup_ratio + (1 - warmup_ratio) * current_iter / warmup_iters
-
-        completed_iter_after_warmup = current_iter - warmup_iters
-        completed_epochs = completed_iter_after_warmup // num_steps_per_epoch
-        decay_steps = completed_epochs // args.decay_epochs
-        factor = args.decay_rate ** decay_steps
-
+        progress = (current_iter - warmup_iters) / max(1, total_iters - warmup_iters)
+        factor = (1 - progress) ** args.poly_power
         min_factor = args.min_lr / args.lr
         return max(min_factor, factor)
 
