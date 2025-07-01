@@ -7,6 +7,7 @@ from pathlib import Path
 import torch
 import torch.nn as nn
 import torch.optim as optim
+import torch.distributed as dist
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 from torchvision import datasets, transforms
@@ -79,6 +80,11 @@ def log_weight_stats(model, writer, step):
 
 def train_one_epoch(model, loader, criterion, optimizer, device, epoch, *, writer=None, global_step=0, mixup_cutmix=None, log_interval=100, scheduler=None, clip_grad=None):
     model.train()
+    # Determine if this process is the main process (rank 0)
+    if dist.is_available() and dist.is_initialized():
+        is_main_process = dist.get_rank() == 0
+    else:
+        is_main_process = True
     running_loss = 0.0
     running_acc1 = 0.0
     for i, (imgs, labels) in enumerate(loader):
@@ -104,14 +110,15 @@ def train_one_epoch(model, loader, criterion, optimizer, device, epoch, *, write
         running_acc1 += acc1.item()
 
         global_step += 1
-        if writer is not None:
+        # Only log metrics from the main process (rank 0)
+        if is_main_process and writer is not None:
             writer.add_scalar("train/loss", loss.item(), global_step)
             writer.add_scalar("train/acc1", acc1.item(), global_step)
             writer.add_scalar("train/lr", optimizer.param_groups[0]["lr"], global_step)
             if (i + 1) % log_interval == 0:
                 log_weight_stats(model, writer, global_step)
 
-        if (i + 1) % log_interval == 0:
+        if is_main_process and (i + 1) % log_interval == 0:
             print(
                 f"[Epoch {epoch}] Step {i + 1}/{len(loader)}  "
                 f"Loss: {running_loss / (i + 1):.4f}  "
