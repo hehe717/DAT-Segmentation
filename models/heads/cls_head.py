@@ -18,22 +18,21 @@ class ClsHead(nn.Module):
     ) -> None:
         super().__init__()
 
-        self.norms = nn.ModuleList([LayerNormProxy(c) for c in in_channels])
-        total_channels = sum(in_channels)
+        # 마지막 피쳐(가장 높은 stage 출력)만 사용
+        last_channels = in_channels[-1]
+        self.norm = LayerNormProxy(last_channels)
 
         self.pool = nn.AdaptiveAvgPool2d(1)
         self.dropout = nn.Dropout(dropout_ratio) if dropout_ratio > 0 else nn.Identity()
-        self.fc = nn.Linear(total_channels, num_classes)
+        self.fc = nn.Linear(last_channels, num_classes)
 
     def forward(self, x: Sequence[torch.Tensor]):
-        outs = []
-        for i, feat in enumerate(x):
-            y = self.norms[i](feat)
-            y = self.pool(y)
-            y = torch.flatten(y, 1)
-            outs.append(y)
-        x = torch.cat(outs, dim=1)
+        # 시퀀스의 마지막 피쳐만 활용
+        feat = x[-1]
+        feat = self.norm(feat)
+        feat = self.pool(feat)
+        feat = torch.flatten(feat, 1)
 
-        x = self.dropout(x)
-        logits = self.fc(x)
+        feat = self.dropout(feat)
+        logits = self.fc(feat)
         return logits 
