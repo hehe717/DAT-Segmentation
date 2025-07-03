@@ -282,11 +282,21 @@ def main():
                 },
                 ckpt_path,
             )
+            backbone_state_dict = (
+                model.module.backbone if isinstance(model, nn.parallel.DistributedDataParallel) else model.backbone
+            ).state_dict()
+            backbone_ckpt_path = Path(args.output) / f"epoch_{epoch}_backbone.pth"
+            torch.save(backbone_state_dict, backbone_ckpt_path)
         if val_acc1 > best_acc1:
             best_acc1 = val_acc1
             best_path = Path(args.output) / "best.pth"
             torch.save(model.state_dict(), best_path)
-            print(f"New best Acc@1: {best_acc1:.2f}%, checkpoint saved to {best_path}")
+            backbone_best_path = Path(args.output) / "best_backbone.pth"
+            backbone_state_dict = (
+                model.module.backbone if isinstance(model, nn.parallel.DistributedDataParallel) else model.backbone
+            ).state_dict()
+            torch.save(backbone_state_dict, backbone_best_path)
+            print(f"New best Acc@1: {best_acc1:.2f}%, checkpoint saved to {best_path} (backbone at {backbone_best_path})")
 
     if writer is not None:
         writer.close()
