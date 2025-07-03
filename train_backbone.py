@@ -80,13 +80,14 @@ def log_weight_stats(model, writer, step):
 
 def train_one_epoch(model, loader, criterion, optimizer, device, epoch, *, writer=None, global_step=0, mixup_cutmix=None, log_interval=100, scheduler=None, clip_grad=None):
     model.train()
-    # Determine if this process is the main process (rank 0)
     if dist.is_available() and dist.is_initialized():
         is_main_process = dist.get_rank() == 0
     else:
         is_main_process = True
+
     running_loss = 0.0
     running_acc1 = 0.0
+
     for i, (imgs, labels) in enumerate(loader):
         imgs, labels = imgs.to(device, non_blocking=True), labels.to(device, non_blocking=True)
 
@@ -110,14 +111,11 @@ def train_one_epoch(model, loader, criterion, optimizer, device, epoch, *, write
         running_acc1 += acc1.item()
 
         global_step += 1
-        # Only log metrics from the main process (rank 0)
-        if is_main_process and writer is not None:
-            writer.add_scalar("train/loss", loss.item(), global_step)
-            writer.add_scalar("train/acc1", acc1.item(), global_step)
-            writer.add_scalar("train/lr", optimizer.param_groups[0]["lr"], global_step)
-            if (i + 1) % log_interval == 0:
-                log_weight_stats(model, writer, global_step)
+        # 주기적으로 weight 통계 기록 (loss/acc 는 epoch 단위 TensorBoard 기록)
+        if is_main_process and writer is not None and (i + 1) % log_interval == 0:
+            log_weight_stats(model, writer, global_step)
 
+        # 콘솔에 학습 진행상황 출력
         if is_main_process and (i + 1) % log_interval == 0:
             print(
                 f"[Epoch {epoch}] Step {i + 1}/{len(loader)}  "
@@ -125,7 +123,23 @@ def train_one_epoch(model, loader, criterion, optimizer, device, epoch, *, write
                 f"Acc@1: {running_acc1 / (i + 1):.2f}%"
             )
 
-    return global_step
+    # ---------------- Epoch 끝: 평균 계산 & 로깅 ----------------
+    epoch_loss = running_loss / len(loader)
+    epoch_acc1 = running_acc1 / len(loader)
+
+    if is_main_process and writer is not None:
+        writer.add_scalar("train/loss", epoch_loss, epoch)
+        writer.add_scalar("train/acc1", epoch_acc1, epoch)
+        writer.add_scalar("train/lr", optimizer.param_groups[0]["lr"], epoch)
+        # 한 epoch 가 종료된 시점에서 weight 통계 기록
+        log_weight_stats(model, writer, epoch)
+
+    if is_main_process:
+        print(
+            f"[Epoch {epoch}] Train Loss: {epoch_loss:.4f}  Train Acc@1: {epoch_acc1:.2f}%"
+        )
+
+    return global_step, epoch_loss, epoch_acc1
 
 
 def validate(model, loader, criterion, device):
@@ -244,7 +258,7 @@ def main():
         if args.distributed:
             train_sampler.set_epoch(epoch)
 
-        global_step = train_one_epoch(
+        global_step, epoch_loss, epoch_acc1 = train_one_epoch(
             model,
             train_loader,
             criterion,
