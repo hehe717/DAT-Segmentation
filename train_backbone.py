@@ -154,7 +154,17 @@ def validate(model, loader, criterion, device):
             acc1_sum += acc1.item()
             acc5_sum += acc5.item()
     n = len(loader)
-    return loss_sum / n, acc1_sum / n, acc5_sum / n
+
+    if dist.is_available() and dist.is_initialized():
+        metrics = torch.tensor([loss_sum, acc1_sum, acc5_sum, float(n)], dtype=torch.float64, device=device)
+        dist.all_reduce(metrics, op=dist.ReduceOp.SUM)
+        loss_sum, acc1_sum, acc5_sum, n = metrics.tolist()
+
+    loss_avg = loss_sum / n
+    acc1_avg = acc1_sum / n
+    acc5_avg = acc5_sum / n
+
+    return loss_avg, acc1_avg, acc5_avg
 
 
 def main():
@@ -243,11 +253,9 @@ def main():
 
     scheduler = optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lr_lambda)
 
-    # TensorBoard writer
-    if not args.distributed or torch.distributed.get_rank() == 0:
-        writer = SummaryWriter(log_dir=args.output)
-    else:
-        writer = None
+    is_main_process = (not args.distributed) or (torch.distributed.get_rank() == 0)
+
+    writer = SummaryWriter(log_dir=args.output) if is_main_process else None
 
     best_acc1 = 0.0
     global_step = 0
@@ -277,7 +285,7 @@ def main():
             log_weight_stats(model, writer, epoch)
             writer.flush()
 
-        if not args.distributed or torch.distributed.get_rank() == 0:
+        if is_main_process:
             print(
                 f"[Epoch {epoch}] Val Loss: {val_loss:.4f}  Acc@1: {val_acc1:.2f}%  Acc@5: {val_acc5:.2f}%"
             )
@@ -300,14 +308,17 @@ def main():
             torch.save(backbone_state_dict, backbone_ckpt_path)
         if val_acc1 > best_acc1:
             best_acc1 = val_acc1
-            best_path = Path(args.output) / "best.pth"
-            torch.save(model.state_dict(), best_path)
-            backbone_best_path = Path(args.output) / "best_backbone.pth"
-            backbone_state_dict = (
-                model.module.backbone if isinstance(model, nn.parallel.DistributedDataParallel) else model.backbone
-            ).state_dict()
-            torch.save(backbone_state_dict, backbone_best_path)
-            print(f"New best Acc@1: {best_acc1:.2f}%, checkpoint saved to {best_path} (backbone at {backbone_best_path})")
+            if is_main_process:
+                best_path = Path(args.output) / "best.pth"
+                torch.save(model.state_dict(), best_path)
+                backbone_best_path = Path(args.output) / "best_backbone.pth"
+                backbone_state_dict = (
+                    model.module.backbone if isinstance(model, nn.parallel.DistributedDataParallel) else model.backbone
+                ).state_dict()
+                torch.save(backbone_state_dict, backbone_best_path)
+                print(
+                    f"New best Acc@1: {best_acc1:.2f}%, checkpoint saved to {best_path} (backbone at {backbone_best_path})"
+                )
 
     if writer is not None:
         writer.close()
