@@ -44,6 +44,11 @@ def accuracy(output, target, topk=(1,)):
             target_b = None
             lam = 1.0
 
+        if target_a.dim() > 1:
+            target_a = target_a.argmax(dim=1)
+        if target_b is not None and target_b.dim() > 1:
+            target_b = target_b.argmax(dim=1)
+
         maxk = max(topk)
         batch_size = target_a.size(0)
 
