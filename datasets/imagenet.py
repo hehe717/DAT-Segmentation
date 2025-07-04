@@ -7,29 +7,10 @@ from PIL import Image
 from torch.utils.data import Dataset, DataLoader
 from torch.utils.data.distributed import DistributedSampler
 from torchvision import transforms
-from timm.data import create_transform
 from timm.data.mixup import Mixup
+from timm.data import create_transform
 
 __all__ = ["get_imagenet_dataloader"]
-
-
-def _get_train_transforms():
-    return create_transform(
-        input_size=224,
-        is_training=True,
-        color_jitter=0.4,
-        auto_augment="rand-m9-mstd0.5-inc1",
-        interpolation="bicubic",
-        re_prob=0.25,
-    )
-
-
-def _get_val_transforms():
-    return create_transform(
-        input_size=224,
-        is_training=False,
-        interpolation="bicubic",
-    )
 
 
 class _MixupAdapter:
@@ -78,6 +59,31 @@ class ImageNetDataset(Dataset):
         if self.transform:
             img = self.transform(img)
         return img, label
+
+
+def _get_train_transforms(img_size: int = 224):
+    return create_transform(
+        input_size=img_size,
+        is_training=True,
+        color_jitter=0.4,
+        auto_augment="rand-m9-mstd0.5-inc1",
+        interpolation="bicubic",
+        re_prob=0.25,
+        re_mode="pixel",
+        re_count=1,
+        mean=(0.485, 0.456, 0.406),
+        std=(0.229, 0.224, 0.225),
+    )
+
+
+def _get_val_transforms(img_size: int = 224):
+    return create_transform(
+        input_size=img_size,
+        is_training=False,
+        interpolation="bicubic",
+        mean=(0.485, 0.456, 0.406),
+        std=(0.229, 0.224, 0.225),
+    )
 
 
 def get_imagenet_dataloader(
