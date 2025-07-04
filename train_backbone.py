@@ -14,26 +14,9 @@ from torchvision import datasets, transforms
 from torchvision.transforms import InterpolationMode
 from torch.utils.tensorboard import SummaryWriter
 
+from timm.loss import LabelSmoothingCrossEntropy
 from models.dat_classifier import DatClassifier
 from datasets.imagenet import get_imagenet_dataloader
-
-class LabelSmoothingCrossEntropy(torch.nn.Module):
-
-    def __init__(self, smoothing: float = 0.1):
-        super().__init__()
-        self.smoothing = smoothing
-
-    def forward(self, pred: torch.Tensor, target):
-        if isinstance(target, tuple):
-            target_a, target_b, lam = target
-            return lam * self._smooth_loss(pred, target_a) + (1 - lam) * self._smooth_loss(pred, target_b)
-        return self._smooth_loss(pred, target)
-
-    def _smooth_loss(self, pred: torch.Tensor, target: torch.Tensor):
-        num_classes = pred.size(-1)
-        log_prob = torch.nn.functional.log_softmax(pred, dim=-1)
-        target = target.type_as(log_prob)
-        return torch.mean(torch.sum(-target * log_prob, dim=-1))
 
 def accuracy(output, target, topk=(1,)):
     with torch.no_grad():
