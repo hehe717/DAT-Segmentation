@@ -32,9 +32,8 @@ class LabelSmoothingCrossEntropy(torch.nn.Module):
     def _smooth_loss(self, pred: torch.Tensor, target: torch.Tensor):
         num_classes = pred.size(-1)
         log_prob = torch.nn.functional.log_softmax(pred, dim=-1)
-        smooth_target = torch.zeros_like(log_prob).fill_(self.smoothing / (num_classes - 1))
-        smooth_target.scatter_(1, target.unsqueeze(1), 1.0 - self.smoothing)
-        return torch.mean(torch.sum(-smooth_target * log_prob, dim=-1))
+        target = target.type_as(log_prob)
+        return torch.mean(torch.sum(-target * log_prob, dim=-1))
 
 def accuracy(output, target, topk=(1,)):
     with torch.no_grad():
