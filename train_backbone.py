@@ -14,7 +14,7 @@ from torchvision import datasets, transforms
 from torchvision.transforms import InterpolationMode
 from torch.utils.tensorboard import SummaryWriter
 
-from timm.loss import LabelSmoothingCrossEntropy
+from timm.loss import LabelSmoothingCrossEntropy, SoftTargetCrossEntropy
 from models.dat_classifier import DatClassifier
 from datasets.imagenet import get_imagenet_dataloader
 
@@ -115,7 +115,6 @@ def train_one_epoch(model, loader, criterion, optimizer, device, epoch, *, write
         writer.add_scalar("train/loss", epoch_loss, epoch)
         writer.add_scalar("train/acc1", epoch_acc1, epoch)
         writer.add_scalar("train/lr", optimizer.param_groups[0]["lr"], epoch)
-        # 한 epoch 가 종료된 시점에서 weight 통계 기록
         log_weight_stats(model, writer, epoch)
 
     if is_main_process:
@@ -188,7 +187,20 @@ def main():
     if args.distributed:
         model = nn.parallel.DistributedDataParallel(model, device_ids=[device])
 
-    criterion = LabelSmoothingCrossEntropy(smoothing=0.1).to(device)
+    train_loader, val_loader, mixup_cutmix = get_imagenet_dataloader(
+        args.data,
+        batch_size=args.batch_size,
+        num_workers=args.workers,
+        distributed=args.distributed,
+        use_mixup_cutmix=True,
+    )
+
+    if mixup_cutmix is not None:
+        criterion_train = SoftTargetCrossEntropy().to(device)
+    else:
+        criterion_train = LabelSmoothingCrossEntropy(smoothing=0.1).to(device)
+
+    criterion_val = torch.nn.CrossEntropyLoss().to(device)
 
     no_decay_keywords = [
         "absolute_pos_embed",
@@ -213,14 +225,6 @@ def main():
     ]
 
     optimizer = optim.AdamW(param_groups, lr=args.lr, betas=(0.9, 0.999))
-
-    train_loader, val_loader, mixup_cutmix = get_imagenet_dataloader(
-        args.data,
-        batch_size=args.batch_size,
-        num_workers=args.workers,
-        distributed=args.distributed,
-        use_mixup_cutmix=True,
-    )
 
     train_sampler = train_loader.sampler if args.distributed else None
 
@@ -253,7 +257,7 @@ def main():
         global_step, epoch_loss, epoch_acc1 = train_one_epoch(
             model,
             train_loader,
-            criterion,
+            criterion_train,
             optimizer,
             device,
             epoch,
@@ -263,7 +267,7 @@ def main():
             scheduler=scheduler,
             clip_grad=args.clip_grad,
         )
-        val_loss, val_acc1, val_acc5 = validate(model, val_loader, criterion, device)
+        val_loss, val_acc1, val_acc5 = validate(model, val_loader, criterion_val, device)
 
         if writer is not None:
             writer.add_scalar("val/loss", val_loss, epoch)
