@@ -2,6 +2,7 @@
 
 import argparse
 import os
+import math
 from pathlib import Path
 
 import torch
@@ -233,14 +234,14 @@ def main():
     total_iters = args.epochs * num_steps_per_epoch
 
     warmup_ratio = args.warmup_lr / args.lr
+    min_factor = args.min_lr / args.lr
 
     def lr_lambda(current_iter: int):
         if current_iter < warmup_iters:
             return warmup_ratio + (1 - warmup_ratio) * current_iter / warmup_iters
         progress = (current_iter - warmup_iters) / max(1, total_iters - warmup_iters)
-        factor = (1 - progress) ** args.poly_power
-        min_factor = args.min_lr / args.lr
-        return max(min_factor, factor)
+        cosine_factor = 0.5 * (1 + math.cos(math.pi * progress))
+        return max(min_factor, cosine_factor)
 
     scheduler = optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lr_lambda)
 
