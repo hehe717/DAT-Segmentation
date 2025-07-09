@@ -19,6 +19,22 @@ from timm.loss import LabelSmoothingCrossEntropy, SoftTargetCrossEntropy
 from models.dat_classifier import DatClassifier
 from datasets.imagenet import get_imagenet_dataloader
 
+
+
+def load_state(model, ckpt_path):
+    if ckpt_path is None:
+        return
+    if not os.path.isfile(ckpt_path):
+        raise FileNotFoundError(f"Checkpoint not found: {ckpt_path}")
+    checkpoint = torch.load(ckpt_path, map_location="cpu")
+    if isinstance(checkpoint, dict):
+        state_dict = checkpoint.get("model_state", checkpoint.get("state_dict", checkpoint))
+    else:
+        state_dict = checkpoint
+    state_dict = {k[7:] if k.startswith("module.") else k: v for k, v in state_dict.items()}
+    missing, unexpected = model.load_state_dict(state_dict, strict=False)
+    print(f"Checkpoint loaded. Missing keys: {len(missing)}; Unexpected keys: {len(unexpected)}")
+
 def accuracy(output, target, topk=(1,)):
     with torch.no_grad():
         if isinstance(target, tuple):
@@ -182,7 +198,9 @@ def main():
     else:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    model = DatClassifier(num_classes=1000, pretrained=args.pretrained)
+    model = DatClassifier(num_classes=1000)
+    if args.pretrained:
+        load_state(model, args.pretrained)
     model.to(device)
 
     if args.distributed:

@@ -13,12 +13,9 @@ __all__ = ["DatClassifier"]
 class DatClassifier(nn.Module):
     """DAT 백본 + ClsHead 분류 모델 (ImageNet 등)."""
 
-    def __init__(self, num_classes: int = 1000, pretrained: str | None = None) -> None:
+    def __init__(self, num_classes: int = 1000) -> None:
         super().__init__()
         backbone_cfg = self._load_backbone_cfg().copy()
-        if pretrained:
-            backbone_cfg["init_cfg"] = dict(type="Pretrained", checkpoint=pretrained)
-
         self.backbone = DAT(**backbone_cfg, num_classes=num_classes)
         self.head = ClsHead(in_channels=backbone_cfg["dims"], num_classes=num_classes)
 
